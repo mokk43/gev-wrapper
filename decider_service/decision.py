@@ -191,6 +191,10 @@ class DecisionRuntime:
                 "",
             ):
                 question["instructions"] = NOUL_WITHOUT_INSTRUCTIONS
+            elif question["type"] == "score" and question.get("instructions") == "":
+                # Upstream rejects the contract-valid empty string, so render its
+                # JSON literal through the otherwise unchanged prompt path.
+                question["instructions"] = json.dumps("")
         if questions:
             try:
                 rendered, answer_index, items = self._decider._system_one_items(

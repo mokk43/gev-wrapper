@@ -50,6 +50,9 @@ requirements. Inspection found these differences in the pinned upstream code:
   rejects complete prompts that exceed capacity.
 - Upstream accepts Choice arrays, Score maps, a `bool` type, and omitted Choice
   discriminators, while the pinned HTTP contract is narrower.
+- Upstream rejects an empty Score instruction even though the HTTP contract
+  permits any string. The service passes its JSON string literal through the
+  pinned prompt path so the value remains distinct from omitted or null input.
 - Upstream rejects a one-level Score rubric before assembly. The HTTP contract
   permits one, so the service handles it as a preparation-only answer: level 0
   has probability 1, expected score 0, and confidence 1, with zero backend

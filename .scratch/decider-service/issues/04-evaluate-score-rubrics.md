@@ -24,4 +24,6 @@ one-level rubric is answered during preparation with level 0 probability 1,
 expected score 0, confidence 1, and zero backend usage, matching the pinned
 assembler formulas without entering its two-level prompt assertion. Tests use
 the assembler's four-decimal probability/confidence output and two-decimal
-expected-score output as the numerical boundary.
+expected-score output as the numerical boundary. Contract-valid empty text
+instructions are represented by their JSON literal before pinned preparation
+instead of inheriting upstream's empty-question rejection.

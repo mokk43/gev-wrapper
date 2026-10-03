@@ -387,6 +387,48 @@ async def test_one_level_score_is_prepared_without_backend_work(
 
 
 @pytest.mark.anyio
+async def test_score_accepts_empty_text_instructions(
+    metadata_directory: Path,
+) -> None:
+    def backend(_request: httpx.Request) -> httpx.Response:
+        return completion_response({1: 0.4, 2: 0.6})
+
+    app = create_app(
+        configured_settings(metadata_directory),
+        backend_transport=httpx.MockTransport(backend),
+    )
+
+    async with (
+        app.router.lifespan_context(app),
+        service_client(app) as client,
+    ):
+        response = await client.post(
+            "/v1/systemone",
+            headers={"Authorization": "Bearer caller-key"},
+            json={
+                "model": "decider-4b-q4-k-m",
+                "state": "evidence",
+                "questions": {
+                    "severity": {
+                        "type": "score",
+                        "instructions": "",
+                        "criteria": ["low", "high"],
+                    }
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["answers"]["severity"] == {
+        "type": "score",
+        "score": 0.5,
+        "confidence": 0.0,
+        "legend": {"0": "low", "1": "high"},
+        "probabilities": {"0": 0.5, "1": 0.5},
+    }
+
+
+@pytest.mark.anyio
 async def test_mixed_choice_and_nonisolated_score_use_per_type_calibration_once(
     metadata_directory: Path,
 ) -> None:

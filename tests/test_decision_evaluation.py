@@ -38,7 +38,17 @@ def metadata_directory(tmp_path: Path) -> Path:
     vocabulary.update(
         {
             word: next_token_id + offset
-            for offset, word in enumerate(("none", "not", "listed", "here"))
+            for offset, word in enumerate(
+                (
+                    "none",
+                    "not",
+                    "listed",
+                    "here",
+                    '["instruction-marker"]',
+                    '["true-marker"]',
+                    '["false-marker"]',
+                )
+            )
         }
     )
     tokenizer = Tokenizer(models.WordLevel(vocabulary, unk_token="[UNK]"))
@@ -206,6 +216,58 @@ async def test_choice_is_evaluated_through_the_public_http_boundary(
 
 
 @pytest.mark.anyio
+async def test_noul_is_evaluated_through_the_public_http_boundary(
+    metadata_directory: Path,
+) -> None:
+    backend_requests: list[httpx.Request] = []
+
+    async def backend(request: httpx.Request) -> httpx.Response:
+        backend_requests.append(request)
+        return completion_response({1: 0.123456, 2: 0.876544})
+
+    app = create_app(
+        configured_settings(metadata_directory),
+        backend_transport=httpx.MockTransport(backend),
+    )
+
+    async with (
+        app.router.lifespan_context(app),
+        service_client(app) as client,
+    ):
+        response = await client.post(
+            "/v1/systemone",
+            headers={"Authorization": "Bearer caller-key"},
+            json={
+                "model": "jev-latest",
+                "state": "The message advertises a product.",
+                "questions": {
+                    "is_spam": {
+                        "type": "noul",
+                        "instructions": "Is this message spam?",
+                        "criteria": {
+                            "true": "Unsolicited advertising",
+                            "false": "A legitimate conversation",
+                        },
+                    }
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body == {
+        "model": "decider-4b-q4-k-m",
+        "answers": {"is_spam": {"type": "noul", "noul": 0.8765}},
+        "usage": {"input_tokens": 11, "output_tokens": 1},
+    }
+    assert body["answers"]["is_spam"]["noul"] == pytest.approx(
+        0.8765,
+        abs=0.00005,
+    )
+    assert len(backend_requests) == 1
+
+
+@pytest.mark.anyio
 async def test_multiple_choices_apply_temperature_once_and_sum_row_usage(
     metadata_directory: Path,
 ) -> None:
@@ -284,6 +346,78 @@ async def test_multiple_choices_apply_temperature_once_and_sum_row_usage(
 
 
 @pytest.mark.anyio
+async def test_mixed_questions_apply_type_calibration_once_and_sum_usage(
+    metadata_directory: Path,
+) -> None:
+    (metadata_directory / "decider_config.json").write_text(
+        json.dumps(
+            {
+                "version": "test",
+                "temperature": 1.0,
+                "temperature_by_type": {"choice": 1.0, "noul": 2.0},
+                "neutralize_none": True,
+                "isolated_levels": True,
+            }
+        )
+    )
+    backend_requests: list[httpx.Request] = []
+
+    def backend(request: httpx.Request) -> httpx.Response:
+        backend_requests.append(request)
+        return completion_response(
+            {1: 0.09, 2: 0.81},
+            input_tokens=len(backend_requests) * 10,
+        )
+
+    app = create_app(
+        configured_settings(metadata_directory),
+        backend_transport=httpx.MockTransport(backend),
+    )
+
+    async with (
+        app.router.lifespan_context(app),
+        service_client(app) as client,
+    ):
+        response = await client.post(
+            "/v1/systemone",
+            headers={"Authorization": "Bearer mixed-key"},
+            json={
+                "model": "jev-latest",
+                "state": "evidence",
+                "questions": {
+                    "priority": {
+                        "type": "choice",
+                        "criteria": {"routine": None, "urgent": None},
+                    },
+                    "is_spam": {
+                        "type": "noul",
+                        "instructions": "Is this spam?",
+                    },
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "model": "decider-4b-q4-k-m",
+        "answers": {
+            "priority": {
+                "type": "choice",
+                "choice": "urgent",
+                "confidence": 0.8,
+                "probabilities": {"routine": 0.1, "urgent": 0.9},
+            },
+            "is_spam": {"type": "noul", "noul": 0.75},
+        },
+        "usage": {"input_tokens": 30, "output_tokens": 2},
+    }
+    assert len(backend_requests) == 2
+    assert {
+        request.headers["Authorization"] for request in backend_requests
+    } == {"Bearer mixed-key"}
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("payload", "location"),
     [
@@ -353,6 +487,34 @@ async def test_multiple_choices_apply_temperature_once_and_sum_row_usage(
                 },
             },
             "state",
+        ),
+        (
+            {
+                "model": "decider-4b-q4-k-m",
+                "state": "evidence",
+                "questions": {
+                    "check": {"type": "noul", "criteria": ["no", "yes"]}
+                },
+            },
+            "criteria",
+        ),
+        (
+            {
+                "model": "decider-4b-q4-k-m",
+                "state": "evidence",
+                "questions": {
+                    "check": {"type": "noul", "criteria": {"true": 1}}
+                },
+            },
+            "true",
+        ),
+        (
+            {
+                "model": "decider-4b-q4-k-m",
+                "state": "evidence",
+                "questions": {"check": {"type": "noul", "instructions": True}},
+            },
+            "instructions",
         ),
     ],
 )
@@ -457,21 +619,12 @@ async def test_unknown_model_and_configured_limits_fail_before_backend_work(
 
 
 @pytest.mark.anyio
-async def test_other_question_types_are_validated_before_staged_rejection(
+async def test_score_is_validated_before_staged_rejection(
     metadata_directory: Path,
 ) -> None:
     app = create_app(configured_settings(metadata_directory))
 
     async with service_client(app) as client:
-        valid_noul = await client.post(
-            "/v1/systemone",
-            headers={"Authorization": "Bearer caller-key"},
-            json={
-                "model": "decider-4b-q4-k-m",
-                "state": "evidence",
-                "questions": {"check": {"type": "noul", "criteria": None}},
-            },
-        )
         invalid_score = await client.post(
             "/v1/systemone",
             headers={"Authorization": "Bearer caller-key"},
@@ -484,16 +637,68 @@ async def test_other_question_types_are_validated_before_staged_rejection(
             },
         )
 
-    assert valid_noul.status_code == 422
-    assert valid_noul.json()["detail"][0]["loc"] == [
-        "body",
-        "questions",
-        "check",
-        "type",
-    ]
-    assert valid_noul.json()["detail"][0]["type"] == "unsupported_question_type"
     assert invalid_score.status_code == 422
     assert "criteria" in invalid_score.json()["detail"][0]["loc"]
+
+
+@pytest.mark.anyio
+async def test_noul_accepts_optional_fields_and_preserves_structured_values(
+    metadata_directory: Path,
+) -> None:
+    backend_prompts: list[list[int]] = []
+
+    def backend(request: httpx.Request) -> httpx.Response:
+        backend_prompts.append(json.loads(request.content)["prompt"])
+        return completion_response({1: 0.6, 2: 0.4})
+
+    app = create_app(
+        configured_settings(metadata_directory),
+        backend_transport=httpx.MockTransport(backend),
+    )
+    questions = [
+        {"type": "noul", "instructions": "Is this true?"},
+        {"type": "noul", "instructions": "Is this true?", "criteria": None},
+        {
+            "type": "noul",
+            "instructions": ["instruction-marker"],
+            "criteria": {
+                "true": ["true-marker"],
+                "false": ["false-marker"],
+            },
+        },
+        {"type": "noul", "instructions": None, "criteria": None},
+        {"type": "noul"},
+    ]
+
+    async with (
+        app.router.lifespan_context(app),
+        service_client(app) as client,
+    ):
+        responses = [
+            await client.post(
+                "/v1/systemone",
+                headers={"Authorization": "Bearer caller-key"},
+                json={
+                    "model": "decider-4b-q4-k-m",
+                    "state": "evidence",
+                    "questions": {"check": question},
+                },
+            )
+            for question in questions
+        ]
+
+    assert [response.status_code for response in responses] == [200] * 5
+    assert all(
+        response.json()["answers"] == {
+            "check": {"type": "noul", "noul": 0.4}
+        }
+        for response in responses
+    )
+    tokenizer = PreTrainedTokenizerFast.from_pretrained(metadata_directory)
+    structured_prompt = tokenizer.decode(backend_prompts[2])
+    assert '["instruction-marker"]' in structured_prompt
+    assert '["true-marker"]' in structured_prompt
+    assert '["false-marker"]' in structured_prompt
 
 
 @pytest.mark.anyio
@@ -719,7 +924,7 @@ async def test_malformed_backend_data_returns_a_sanitized_502(
 
 
 @pytest.mark.anyio
-async def test_slow_caller_does_not_block_another_caller_or_mix_credentials(
+async def test_concurrent_noul_callers_keep_results_usage_and_credentials_isolated(
     metadata_directory: Path,
 ) -> None:
     slow_started = asyncio.Event()
@@ -731,7 +936,8 @@ async def test_slow_caller_does_not_block_another_caller_or_mix_credentials(
         if request.headers["Authorization"] == "Bearer slow-key":
             slow_started.set()
             await release_slow.wait()
-        return completion_response({1: 0.7, 2: 0.3})
+            return completion_response({1: 0.8, 2: 0.2}, input_tokens=13)
+        return completion_response({1: 0.1, 2: 0.9}, input_tokens=17)
 
     app = create_app(
         configured_settings(metadata_directory),
@@ -741,9 +947,9 @@ async def test_slow_caller_does_not_block_another_caller_or_mix_credentials(
         "model": "decider-4b-q4-k-m",
         "state": "evidence",
         "questions": {
-            "priority": {
-                "type": "choice",
-                "criteria": {"urgent": None, "routine": None},
+            "check": {
+                "type": "noul",
+                "instructions": "Is this true?",
             }
         },
     }
@@ -773,6 +979,20 @@ async def test_slow_caller_does_not_block_another_caller_or_mix_credentials(
 
     assert fast_response.status_code == 200
     assert slow_response.status_code == 200
+    assert fast_response.json()["answers"] == {
+        "check": {"type": "noul", "noul": 0.9}
+    }
+    assert fast_response.json()["usage"] == {
+        "input_tokens": 17,
+        "output_tokens": 1,
+    }
+    assert slow_response.json()["answers"] == {
+        "check": {"type": "noul", "noul": 0.2}
+    }
+    assert slow_response.json()["usage"] == {
+        "input_tokens": 13,
+        "output_tokens": 1,
+    }
     assert [request.headers["Authorization"] for request in backend_requests] == [
         "Bearer slow-key",
         "Bearer fast-key",
@@ -839,6 +1059,61 @@ async def test_question_prompt_is_unchanged_when_other_questions_are_reordered(
     assert first.json()["answers"]["priority"] == second.json()["answers"][
         "priority"
     ]
+
+
+@pytest.mark.anyio
+async def test_noul_is_unchanged_when_an_independent_question_is_added_first(
+    metadata_directory: Path,
+) -> None:
+    backend_requests: list[httpx.Request] = []
+
+    def backend(request: httpx.Request) -> httpx.Response:
+        backend_requests.append(request)
+        return completion_response({1: 0.3, 2: 0.7})
+
+    app = create_app(
+        configured_settings(metadata_directory),
+        backend_transport=httpx.MockTransport(backend),
+    )
+    check = {
+        "type": "noul",
+        "instructions": "Is this request urgent?",
+        "criteria": {"true": "urgent", "false": "routine"},
+    }
+    owner = {
+        "type": "choice",
+        "instructions": "Choose an owner.",
+        "criteria": {"support": None, "sales": None},
+    }
+
+    async with (
+        app.router.lifespan_context(app),
+        service_client(app) as client,
+    ):
+        first = await client.post(
+            "/v1/systemone",
+            headers={"Authorization": "Bearer caller-key"},
+            json={
+                "model": "decider-4b-q4-k-m",
+                "state": "same evidence",
+                "questions": {"check": check},
+            },
+        )
+        second = await client.post(
+            "/v1/systemone",
+            headers={"Authorization": "Bearer caller-key"},
+            json={
+                "model": "decider-4b-q4-k-m",
+                "state": "same evidence",
+                "questions": {"owner": owner, "check": check},
+            },
+        )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    prompts = [json.loads(request.content)["prompt"] for request in backend_requests]
+    assert prompts[0] == prompts[2]
+    assert first.json()["answers"]["check"] == second.json()["answers"]["check"]
 
 
 @pytest.mark.anyio

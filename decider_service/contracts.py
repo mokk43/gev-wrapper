@@ -61,6 +61,19 @@ class ChoiceAnswer(BaseModel):
     probabilities: dict[str, float]
 
 
+class NoulAnswer(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["noul"]
+    noul: float = Field(ge=0.0, le=1.0)
+
+
+Answer = Annotated[
+    ChoiceAnswer | NoulAnswer,
+    Field(discriminator="type"),
+]
+
+
 class Usage(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -72,5 +85,5 @@ class SystemOneResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     model: str
-    answers: dict[str, ChoiceAnswer] = Field(min_length=1)
+    answers: dict[str, Answer] = Field(min_length=1)
     usage: Usage

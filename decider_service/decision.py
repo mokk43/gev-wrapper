@@ -21,11 +21,14 @@ from decider.prompt import (  # type: ignore[import-untyped]
     letter_ids,
     resolve_layout,
 )
-from decider.systemone import assemble  # type: ignore[import-untyped]
+from decider.systemone import (  # type: ignore[import-untyped]
+    NOUL_WITHOUT_INSTRUCTIONS,
+    assemble,
+)
 from transformers import AutoTokenizer
 
 from decider_service.config import Settings
-from decider_service.contracts import ChoiceAnswer, SystemOneRequest
+from decider_service.contracts import Answer, ChoiceAnswer, NoulAnswer, SystemOneRequest
 
 
 class PublicInputError(Exception):
@@ -147,6 +150,12 @@ class DecisionRuntime:
             name: question.model_dump(mode="python")
             for name, question in request.questions.items()
         }
+        for question in questions.values():
+            if question["type"] == "noul" and question.get("instructions") in (
+                None,
+                "",
+            ):
+                question["instructions"] = NOUL_WITHOUT_INSTRUCTIONS
         try:
             rendered, answer_index, items = self._decider._system_one_items(
                 request.state,
@@ -316,7 +325,7 @@ async def _evaluate_row(
 def _calibrate_and_assemble(
     prepared: PreparedDecision,
     rows: list[BackendRow],
-) -> dict[str, ChoiceAnswer]:
+) -> dict[str, Answer]:
     logits = torch.full((len(rows), MAX_OPTIONS), float("-inf"))
     for row_number, row in enumerate(rows):
         logits[row_number, : len(row.log_probabilities)] = torch.tensor(
@@ -334,8 +343,19 @@ def _calibrate_and_assemble(
         probability_rows,
     )
 
-    answers: dict[str, ChoiceAnswer] = {}
+    answers: dict[str, Answer] = {}
     for name, raw_answer in assembled.items():
+        if raw_answer.get("type") == "noul":
+            noul = raw_answer.get("noul")
+            if (
+                isinstance(noul, bool)
+                or not isinstance(noul, int | float)
+                or not math.isfinite(noul)
+                or not 0.0 <= noul <= 1.0
+            ):
+                raise BackendContractError("assembled Noul probability is invalid")
+            answers[name] = NoulAnswer(type="noul", noul=float(noul))
+            continue
         probabilities = cast(dict[str, float], raw_answer["probabilities"])
         tolerance = len(probabilities) * 0.00005 + 1e-7
         if (
@@ -364,7 +384,7 @@ def _calibrate_and_assemble(
     return answers
 
 
-async def evaluate_choice_request(
+async def evaluate_request(
     request: SystemOneRequest,
     *,
     runtime: DecisionRuntime,
@@ -372,7 +392,7 @@ async def evaluate_choice_request(
     capacity: InferenceCapacity,
     bearer_token: str,
     probability_coverage: int,
-) -> tuple[dict[str, ChoiceAnswer], int, int]:
+) -> tuple[dict[str, Answer], int, int]:
     prepared = await asyncio.to_thread(runtime.prepare, request)
     rows = await asyncio.gather(
         *(

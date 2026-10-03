@@ -24,7 +24,7 @@ from decider_service.decision import (
     DecisionRuntime,
     InferenceCapacity,
     PublicInputError,
-    evaluate_choice_request,
+    evaluate_request,
 )
 
 
@@ -209,13 +209,16 @@ def create_app(
                 "too_many_questions",
             )
         for name, question in request.questions.items():
-            if question.type != "choice":
+            if question.type == "score":
                 raise _field_validation_error(
                     ("questions", name, "type"),
                     "question type is not implemented yet",
                     "unsupported_question_type",
                 )
-            if len(question.criteria) > settings.max_options:
+            if (
+                question.type == "choice"
+                and len(question.criteria) > settings.max_options
+            ):
                 raise _field_validation_error(
                     ("questions", name, "criteria"),
                     "option count exceeds configured capacity",
@@ -230,7 +233,7 @@ def create_app(
                         if runtime is None:
                             runtime = await asyncio.to_thread(DecisionRuntime, settings)
                             app.state.decision_runtime = runtime
-                answers, input_tokens, output_tokens = await evaluate_choice_request(
+                answers, input_tokens, output_tokens = await evaluate_request(
                     request,
                     runtime=runtime,
                     client=app.state.backend_client,

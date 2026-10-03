@@ -13,6 +13,8 @@ dependencies = [
   "fastapi==0.115.12",
   "httpx==0.28.1",
   "pydantic-settings==2.12.0",
+  "torch==2.14.1",
+  "transformers==5.18.0",
   "uvicorn==0.34.2",
 ]
 
@@ -25,6 +27,7 @@ dev = [
   "mypy==1.20.2",
   "pytest==8.4.2",
   "ruff==0.11.10",
+  "tokenizers==0.23.2",
 ]
 
 [tool.hatch.build.targets.wheel]

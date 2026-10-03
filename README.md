@@ -4,7 +4,14 @@ An async FastAPI service being built to accept TypeSafe's `/v1/systemone` reques
 
 ## Status
 
-The design was accepted on 2026-10-02. The first implementation slice now provides the configured `GET /v1/models` catalog, strict environment validation, pinned dependencies, and public service/check entry points. Decision inference, caller authentication, and backend readiness are not implemented yet. The catalog is therefore restricted to loopback and is not production-ready. The two original Python files remain reference adapters, not the running service implementation.
+The design was accepted on 2026-10-02. The service now provides the configured
+`GET /v1/models` catalog and async `POST /v1/systemone` evaluation for Choice
+questions. Choice requests use pinned Decider preparation, calibrated upstream
+assembly, and llama.cpp's native `/completion` endpoint through one shared async
+client. Noul, Score, coverage recovery, bounded admission, whole-request
+deadlines, readiness checks, and the final authentication/error boundary remain
+separate implementation slices. The service remains restricted to loopback and
+is not production-ready.
 
 ## Catalog setup
 
@@ -28,9 +35,33 @@ when checking a future authenticated slice:
 uv run decider-service-check --base-url http://127.0.0.1:8000
 ```
 
-The service is pinned to CPython 3.12.5. The locked environment includes the
-inspected `decider-ai==1.8.1` dependency, but the catalog does not load model
-weights or import inference code.
+The service is pinned to CPython 3.12.5 and `decider-ai==1.8.1`. It loads only
+matching tokenizer/configuration metadata. Model weights remain on the external
+llama.cpp backend.
+
+Submit Choice questions with the caller's backend credential:
+
+```shell
+curl http://127.0.0.1:8000/v1/systemone \
+  -H 'Authorization: Bearer <API_KEY>' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "decider-4b-q4-k-m",
+    "state": "The production service is down.",
+    "questions": {
+      "priority": {
+        "type": "choice",
+        "instructions": "Choose the response priority.",
+        "criteria": {"routine": "Can wait", "urgent": "Act now"}
+      }
+    }
+  }'
+```
+
+The response maps native `tokens_evaluated` and `tokens_predicted` counters to
+`usage.input_tokens` and `usage.output_tokens`. Their real accounting semantics
+remain unverified until the selected llama.cpp build is checked; mock-backed
+tests establish request-local summing only.
 
 ## Project documents
 
@@ -46,13 +77,13 @@ weights or import inference code.
 ## Reference code
 
 - [decider_wrapper.py](decider_wrapper.py) initializes a remote-backed subclass of upstream `Decider`, preserving model configuration, prompt layout, and calibration settings.
-- [remote_llamacpp_engine.py](remote_llamacpp_engine.py) evaluates final answer slots through llama.cpp's native `/completion` endpoint. Its synchronous transport must be adapted for the accepted async design.
+- [remote_llamacpp_engine.py](remote_llamacpp_engine.py) is the original synchronous payload/scoring reference. The running service adapts that boundary to async HTTP and request-local accounting.
 
 GGUF weights belong to the external llama.cpp deployment. The planned service needs matching tokenizer and Decider configuration metadata locally; it does not load model weights.
 
 ## Development and authentication inputs
 
-The user supplied a local decider-4b test backend; its address and test credential are recorded in the [service configuration requirements](docs/service-design.md#configuration-and-deployment-inputs). Availability and capabilities have not been verified. Real users will supply TypeSafe-format bearer credentials that the service forwards to the configured backend, isolated per request. Startup probe credentials remain separate and cannot serve as runtime authentication fallback.
+The user supplied a local decider-4b test backend; its address and test credential are recorded in the [service configuration requirements](docs/service-design.md#configuration-and-deployment-inputs). Availability and capabilities have not been verified. Choice requests require TypeSafe-format bearer credentials, forwarded to the configured backend per request and never installed on the shared client. The public model catalog's final authentication behavior and backend credential rejection mapping remain part of the operational-boundary slice. Startup probe credentials remain separate and cannot serve as runtime authentication fallback.
 
 ## References
 

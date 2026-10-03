@@ -21,8 +21,8 @@ not committed.
 | `DECIDER_CONTEXT_CAPACITY` | Verified backend context capacity. |
 | `DECIDER_BACKEND_SLOTS` | Verified parallel evaluation capacity. |
 | `DECIDER_ADMISSION_CAPACITY` | Maximum admitted requests. It must be at least the backend slot count. |
-| `DECIDER_MAX_REQUEST_BYTES` | Maximum accepted request size for later decision endpoints. |
-| `DECIDER_MAX_QUESTIONS` | Maximum questions per later decision request. |
+| `DECIDER_MAX_REQUEST_BYTES` | Maximum accepted `/v1/systemone` request-body size. |
+| `DECIDER_MAX_QUESTIONS` | Maximum questions per `/v1/systemone` request. |
 | `DECIDER_MAX_OPTIONS` | Maximum alternatives per question, from 2 through Decider's limit of 255. |
 
 ## Defaults and optional inputs
@@ -32,12 +32,15 @@ not committed.
 | `DECIDER_MODEL_ALIASES` | `[]` | JSON array of deliberately enabled compatibility aliases. No alias, including `jev-latest`, is implicit. |
 | `DECIDER_BIND_HOST` | `127.0.0.1` | Listen address. This catalog slice rejects non-loopback addresses until authentication and exposure checks are implemented. |
 | `DECIDER_BIND_PORT` | `8000` | Listen port. |
-| `DECIDER_REQUEST_DEADLINE_SECONDS` | `60` | Whole-request deadline for later decision requests. |
-| `DECIDER_INITIAL_PROBABILITY_COVERAGE` | `256` | Initial llama.cpp probability coverage for later inference. |
+| `DECIDER_REQUEST_DEADLINE_SECONDS` | `60` | Whole-request deadline reserved for the later deadline/admission slice; not yet enforced. |
+| `DECIDER_INITIAL_PROBABILITY_COVERAGE` | `256` | llama.cpp `n_probs` used by Choice evaluation. Missing required labels currently fail with 502; recovery is a later slice. |
 | `DECIDER_OPERATOR_PROBE_API_KEY` | unset | Optional startup-readiness credential. This slice does not send it or use it as a caller fallback. |
 
-The documented local backend and key are test inputs, not defaults. Caller
-authentication and forwarding are implemented by issue 08; until then the
-catalog remains loopback-only. Creating the application establishes one shared,
-lifecycle-managed backend HTTP client, but this slice deliberately performs no
-readiness request and makes no claim that the backend is available.
+The documented local backend and key are test inputs, not defaults. Choice
+requests forward their caller's bearer credential on each backend row without
+mutating the shared client. Final authentication behavior for the catalog and
+backend credential rejection remains part of the operational-boundary slice;
+the service stays loopback-only. Creating the application establishes one
+shared, lifecycle-managed backend HTTP client. No readiness request is made and
+backend availability, counter semantics, and artifact compatibility remain
+unverified.

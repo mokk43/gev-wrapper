@@ -1,0 +1,132 @@
+# Accepted service design
+
+Status: accepted on 2026-10-02; implementation deferred.
+
+## Purpose and boundary
+
+Provide an async Python FastAPI service between TypeSafe clients and one externally managed llama.cpp server running decider-4b GGUF. Preserve the TypeSafe HTTP request and response shapes while retaining Decider's prompt construction, option probabilities, and fitted calibration. Protocol compatibility does not promise Jev-equivalent predictions or calibration after quantization.
+
+The accepted scope includes `POST /v1/systemone`, `GET /v1/models`, request validation, backend adaptation, service authentication, bounded admission, and error mapping. It excludes loading GGUF weights in the service, provisioning llama.cpp, free-text generation, streaming, and a claim to reproduce the hosted TypeSafe platform's billing or rate-limit system.
+
+## Contract authority
+
+[TypeSafe's HTTP OpenAPI](https://api.typesafe.ai/openapi.json), inspected on 2026-10-02, is authoritative for public payload shapes. The [official SDK types](https://github.com/typesafe-ai/typesafe-sdk-js/blob/main/src/types.ts) are an interoperability reference. Some SDK types are broader than HTTP OpenAPI, including nullable state; the service follows HTTP OpenAPI rather than silently widening the contract.
+
+External schemas and package source can change. At implementation time, capture and pin the contract revision and compatible Decider dependency version. Resolve differences explicitly rather than assuming that the current branch still matches this design.
+
+### Requests
+
+`POST /v1/systemone` takes a JSON object with required `model`, `state`, and nonempty `questions` fields.
+
+- `model` selects a configured model name or compatibility alias.
+- `state` is text, a JSON object, or an array. HTTP OpenAPI does not permit null state.
+- `questions` maps caller-chosen names to typed definitions. Support mixed Choice, Noul, and Score questions in the same request.
+- Instructions may be text, objects, arrays, null, or omitted, as permitted by each question schema.
+- Choice criteria are an object mapping labels to descriptions; descriptions may be text, objects, arrays, or null. An array of labels is an upstream Decider extension, not part of the accepted public contract.
+- Noul criteria may be omitted, null, or an object with optional `true` and `false` descriptions.
+- Score criteria are an ordered, nonempty array of text, object, or array descriptions. The inspected HTTP schema permits one level, while some SDK validation requires two. Handle a valid one-level rubric explicitly rather than letting a backend two-option assertion define the public contract.
+
+Validate backend option capacity and configured request limits before inference. Inputs within the HTTP schema but beyond supported model capacity must receive a field-specific validation error. Preserve question names and criterion labels in the answer mapping.
+
+### Successful responses
+
+Return a JSON object with exactly the required contract structure: `model`, `answers`, and `usage`. Answer names match the submitted question names, and each answer's `type` matches its question.
+
+- Choice: `type`, `choice`, `confidence`, and `probabilities` keyed by the original labels.
+- Noul: `type` and numeric `noul` in the range zero to one.
+- Score: `type`, `score`, `confidence`, `legend`, and `probabilities`. Legend and probability keys are string representations of zero-based rubric positions; legend values preserve the requested descriptions.
+- Usage: integer `input_tokens` and `output_tokens`, using the accounting policy below.
+
+Use upstream Decider's answer assembly and confidence semantics rather than introducing a new definition. In particular, Score represents the expected level, not the winning integer level. Require finite probabilities within zero to one and distributions that sum to approximately one; account for the pinned assembler's rounding when defining numerical tolerances.
+
+`GET /v1/models` returns TypeSafe's `{models: [...]}` shape, describing configured names and accepted aliases. Metadata includes the contract's name, description, and release date fields; supply an actual configured release date rather than inventing one. Clearly identify aliases as routing to Decider.
+
+## Model identity and artifacts
+
+Use a single configured backend. Accept only explicitly configured names and aliases, allowing `jev-latest` when an operator deliberately enables it for existing clients. An alias does not identify the backend weights. Return the actual configured Decider model identity and reject unknown requested models with a validation error.
+
+The local metadata directory must match the GGUF checkpoint: tokenizer vocabulary, option label token IDs, prompt layout, and Decider calibration configuration. Pin the model revision, quantization, tokenizer/config revision, and compatible Decider package version. Validate configuration and tokenizer compatibility before accepting inference traffic. Do not substitute stock Qwen metadata or default calibration silently.
+
+The supplied wrapper constructs its name from the configuration's version field. That name alone may not uniquely identify decider-4b or its artifact revision; implementation must expose an explicit, truthful model identity.
+
+## Async inference flow
+
+1. Authenticate and validate the complete request, resolve its model name, and apply admission limits.
+2. Render state and questions using the pinned Decider implementation. Preserve criterion ordering, model-specific prompt layout, option neutralization, and isolated Score-level behavior from matching configuration.
+3. Plan independent rows with `independent=True`. Every remote row must contain exactly one answer slot at the final prompt position. An isolated Score question may require one row per rubric level.
+4. Check the entire rendered prompt, including question and rubric tokens plus the one-token prediction allowance, against the deployed backend's available context capacity. Reject excess rather than truncating state or allowing backend context shifting to discard evidence.
+5. Submit token IDs through a shared, lifecycle-managed `httpx.AsyncClient` to llama.cpp's native `/completion` endpoint, with bounded concurrent backend evaluations.
+6. Read the distribution at the final answer slot, match option tokens by ID, and apply the configured Decider temperature exactly once. Assemble the typed answers using the existing semantics.
+7. Validate the complete response and return it only if every question succeeded.
+
+The supplied engine is a reference for the payload and scoring math; its blocking `requests.Session` and sequential item loop do not satisfy native async I/O. The inherited `Decider.system_one` method is also synchronous. Adapt the preparation, awaited evaluation, and assembly boundary explicitly; replacing the engine with an async method without adapting its callers will not work.
+
+Reuse upstream prompt and assembly logic where practical and pin any private interfaces used. Offload sufficiently expensive synchronous tokenization or preparation so it cannot monopolize the event loop. Keep request results and usage accounting local to each request instead of deriving them from shared mutable counters.
+
+## Probability extraction and coverage
+
+Preserve the existing raw-token `/completion` approach: one prediction, `temperature=-1`, pre-sampling probabilities, neutral penalties, disabled sampling filters, and non-streaming responses. Start with prompt caching disabled, matching the supplied engine; changing caching later requires equivalence checks.
+
+The expected response contains `probs[0].top_logprobs`, with token IDs and log probabilities. Ignore generated text as a source of decision answers. Relative log probabilities can stand in for logits because the shared full-vocabulary normalization term cancels when softmax is applied over the requested options.
+
+Start coverage at 256 tokens. If required option tokens are absent, increase requested coverage and retry under the same admission limits and whole-request deadline. Use full-vocabulary coverage when needed and supported. Never assign fabricated probability mass to absent options or return a distribution normalized over only the options that happened to appear.
+
+The actual retry schedule, maximum coverage, and vocabulary discovery method must be verified against the chosen llama.cpp build. The supplied engine assumes vocabulary size is available at `/v1/models` as `data[0].meta.n_vocab`; treat that as an unverified deployment capability. If required coverage cannot be obtained, fail the request with a backend error. Full-vocabulary responses can be large and increase latency.
+
+## Token accounting
+
+Report actual llama.cpp input and output token work across all rows and coverage retries attributable to the successful request. Repeated state processing counts repeatedly. Map verified backend counters into `usage.input_tokens` and `usage.output_tokens`; do not assume a field named `tokens_evaluated` has the intended accounting semantics without checking the pinned server version and caching behavior.
+
+Use one documented interpretation of backend counters and ensure accounting remains isolated across concurrent requests. A malformed or missing usage counter is a backend-contract error, not a reason to invent zero usage. Preparation-only results require no backend token work; normal remote inference requests generate one scoring token per evaluation attempt.
+
+This intentionally differs from inherited Decider accounting, which reports logical shared input tokens and zero output tokens. See [ADR 0001](adr/0001-report-model-identity-and-backend-work.md).
+
+## Limits, deadlines, and failures
+
+Start with one service process/worker. Configure a global backend evaluation limit and bounded admission; share that limit across callers and independent rows. Multiple worker processes would each enforce a separate limit, so increasing worker count requires a coordinated capacity strategy.
+
+Use a 60-second whole-request deadline covering admission, preparation, inference, coverage retries, and assembly. Per-call transport timeouts must fit within the remaining budget. Stop scheduling additional work after the deadline or caller cancellation; cancel pending tasks and close outstanding client requests where supported. A closed HTTP connection does not prove backend inference stopped.
+
+Return all answers or an error; do not send partial successful answer maps. Error policy:
+
+- 422: invalid public input, unsupported configured model, model-capacity violation, or oversized prompt. Use TypeSafe's field-oriented `detail` validation shape.
+- 502: malformed backend response, unusable probability coverage, or invalid/missing required backend counters.
+- 503: unavailable backend or exhausted admission capacity.
+- 504: whole-request deadline expired.
+
+Keep public backend errors sanitized; retain a request identifier and concise operational diagnostics. Preserve public authentication failures separately from backend failures. Backend credential rejection is an operator/backend availability problem, not evidence that the caller supplied invalid service credentials. Final non-validation error body details and authentication status handling must be checked against the pinned client behavior during implementation.
+
+The coverage retries above are accepted. A broader transient-error retry policy is not established; avoid adding retries without accounting for the deadline and duplicate backend work.
+
+## Configuration and deployment inputs
+
+Use environment-based configuration. Required deployment information remains unresolved: backend URL and build, decider-4b GGUF revision/quantization, matching metadata directory/revision, public model identity and release date, aliases, backend context capacity and parallel slots, and probability/usage capabilities.
+
+Also configure backend concurrency, admission capacity, request limits, and optional backend credentials. Their numerical values and variable names are implementation/deployment choices, not settled measurements. Expected traffic, typical question counts, and a measured latency target have not been supplied; the 60-second deadline is a guardrail, not a performance claim.
+
+Bind to loopback by default. Network exposure requires a configured service bearer token; pass backend credentials through a separate operator-controlled setting. Never forward the caller's service token to llama.cpp. Omit request bodies from logs, and redact credentials from diagnostics.
+
+At startup, validate the model metadata, configured alias mapping, backend readiness, tokenizer compatibility, probability response shape, usage counters, and context capacity. Missing or incompatible requirements must produce actionable diagnostics and prevent serving inference until resolved. Scope probes to metadata and a bounded synthetic fixture; real user evidence is unnecessary for startup checks.
+
+## Acceptance checks for future implementation
+
+These are required checks, not tests already executed.
+
+- Contract: valid mixed requests and structured descriptions yield the required answer shapes; names, labels, rubric descriptions, and configured identity survive conversion. Exercise nullable/omitted fields according to HTTP OpenAPI, one-level Score, invalid discriminators, empty questions, unknown models, and backend option limits.
+- Semantics: controlled backend distributions produce the expected Choice, Noul, Score, and confidence values through the pinned assembler. Verify per-type calibration once, option-ID matching, isolated levels, rounding tolerance, and independence when questions are reordered or added.
+- Backend: missing labels trigger bounded coverage retries; exhausted coverage, malformed distributions, wrong token IDs, incompatible tokenizers, missing counters, and context overflow fail explicitly. Compare representative GGUF fixtures with a trusted Decider inference baseline using a documented numerical tolerance.
+- Async behavior: a slow backend does not block unrelated requests; concurrent work respects the global limit and bounded admission. Exercise cancellation and a deadline that includes queueing and multiple coverage attempts.
+- Accounting: multiple rows, repeated state, retries, caching behavior, and concurrent callers produce attributable counters rather than shared totals.
+- Operations: service and backend credentials remain separate; network exposure requires service authentication; failures and logs do not expose state, prompts, or secrets. Verify unavailable-backend and shutdown behavior.
+- SDK interoperability: run an official client against a mock-backed service, then an opt-in live smoke check against the configured llama.cpp build. Record actual commands and results; mock checks alone do not prove real GGUF/server compatibility.
+
+Future implementation should include a reproducible dependency manifest and setup/run instructions based on actual entry points. Keep performance claims pending until measurements exist.
+
+## Evidence
+
+- [Supplied wrapper](../decider_wrapper.py): model/config initialization and synchronous inherited inference seam.
+- [Supplied engine](../remote_llamacpp_engine.py): raw token payloads, final-slot restrictions, probability parsing, and calibrated scoring.
+- [Upstream Decider inference](https://github.com/Mapika/decider/blob/main/decider/infer.py): row preparation, synchronous orchestration, answer assembly, and logical token accounting.
+- [Upstream prompt construction](https://github.com/Mapika/decider/blob/main/decider/prompt.py): option token labels, layouts, and state truncation that the service must avoid.
+- [llama.cpp server contract](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md): native completion and probability controls.
+- [decider-4b model card](https://huggingface.co/Mapika/decider-4b): model-specific calibration and metadata requirements.

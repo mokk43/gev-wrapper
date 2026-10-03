@@ -16,14 +16,15 @@ from pydantic import BaseModel, ConfigDict
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from decider_service.config import Settings, load_settings
-from decider_service.contracts import Answer, SystemOneRequest, SystemOneResponse, Usage
+from decider_service.contracts import SystemOneRequest, SystemOneResponse, Usage
 from decider_service.decision import (
     AdmissionCapacityError,
     BackendContractError,
     BackendUnavailableError,
     CallerAuthenticationError,
+    DecisionCapacity,
+    DecisionResult,
     DecisionRuntime,
-    InferenceCapacity,
     PublicInputError,
     evaluate_request,
 )
@@ -55,8 +56,8 @@ _Result = TypeVar("_Result")
 
 class ActiveRequests:
     def __init__(self) -> None:
-        self._tasks: set[asyncio.Task[Any]] = set()
-        self._runners: set[asyncio.Task[Any]] = set()
+        self._work_tasks: set[asyncio.Task[Any]] = set()
+        self._request_tasks: set[asyncio.Task[Any]] = set()
         self._idle = asyncio.Event()
         self._idle.set()
         self._closing = False
@@ -69,35 +70,35 @@ class ActiveRequests:
         if self._closing:
             work.close()
             raise RuntimeError("decision service is shutting down")
-        runner = asyncio.current_task()
-        if runner is None:
+        request_task = asyncio.current_task()
+        if request_task is None:
             work.close()
             raise RuntimeError("decision request has no owning task")
-        task = asyncio.create_task(work)
+        work_task = asyncio.create_task(work)
         disconnected = asyncio.create_task(self._wait_for_disconnect(request))
-        self._tasks.add(task)
-        self._runners.add(runner)
+        self._work_tasks.add(work_task)
+        self._request_tasks.add(request_task)
         self._idle.clear()
         try:
             completed, _pending = await asyncio.wait(
-                (task, disconnected),
+                (work_task, disconnected),
                 return_when=asyncio.FIRST_COMPLETED,
             )
-            if task in completed:
-                return await task
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+            if work_task in completed:
+                return await work_task
+            work_task.cancel()
+            await asyncio.gather(work_task, return_exceptions=True)
             raise asyncio.CancelledError
         except BaseException:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+            work_task.cancel()
+            await asyncio.gather(work_task, return_exceptions=True)
             raise
         finally:
             disconnected.cancel()
             await asyncio.gather(disconnected, return_exceptions=True)
-            self._tasks.discard(task)
-            self._runners.discard(runner)
-            if not self._runners:
+            self._work_tasks.discard(work_task)
+            self._request_tasks.discard(request_task)
+            if not self._request_tasks:
                 self._idle.set()
 
     @staticmethod
@@ -108,11 +109,11 @@ class ActiveRequests:
 
     async def close(self) -> None:
         self._closing = True
-        tasks = tuple(self._tasks)
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        work_tasks = tuple(self._work_tasks)
+        for work_task in work_tasks:
+            work_task.cancel()
+        if work_tasks:
+            await asyncio.gather(*work_tasks, return_exceptions=True)
         await self._idle.wait()
 
 
@@ -201,7 +202,7 @@ def create_app(
             app.state.backend_client = backend_client
             app.state.decision_runtime = None
             app.state.decision_runtime_lock = asyncio.Lock()
-            app.state.inference_capacity = InferenceCapacity(
+            app.state.decision_capacity = DecisionCapacity(
                 backend_slots=settings.backend_slots,
                 admission_capacity=settings.admission_capacity,
             )
@@ -210,6 +211,7 @@ def create_app(
                 yield
             finally:
                 await app.state.active_requests.close()
+                await app.state.decision_capacity.close()
 
     app = FastAPI(title="TypeSafe-compatible Decider service", lifespan=lifespan)
     app.add_middleware(
@@ -295,20 +297,22 @@ def create_app(
                 )
         deadline = asyncio.get_running_loop().time() + settings.request_deadline_seconds
 
-        async def evaluate_admitted_request() -> tuple[dict[str, Answer], int, int]:
-            async with app.state.inference_capacity.admit():
+        async def evaluate_admitted_request() -> DecisionResult:
+            async with app.state.decision_capacity.admit():
                 runtime = app.state.decision_runtime
                 if runtime is None:
                     async with app.state.decision_runtime_lock:
                         runtime = app.state.decision_runtime
                         if runtime is None:
-                            runtime = await asyncio.to_thread(DecisionRuntime, settings)
+                            runtime = await app.state.decision_capacity.run_offloaded(
+                                lambda: DecisionRuntime(settings)
+                            )
                             app.state.decision_runtime = runtime
                 return await evaluate_request(
                     request,
                     runtime=runtime,
                     client=app.state.backend_client,
-                    capacity=app.state.inference_capacity,
+                    capacity=app.state.decision_capacity,
                     bearer_token=bearer_token,
                     probability_coverage=settings.initial_probability_coverage,
                     deadline=deadline,
@@ -316,11 +320,7 @@ def create_app(
 
         try:
             async with asyncio.timeout_at(deadline):
-                (
-                    answers,
-                    input_tokens,
-                    output_tokens,
-                ) = await app.state.active_requests.run(
+                result = await app.state.active_requests.run(
                     evaluate_admitted_request(),
                     http_request,
                 )
@@ -357,10 +357,10 @@ def create_app(
             ) from exc
         return SystemOneResponse(
             model=settings.model_name,
-            answers=answers,
+            answers=result.answers,
             usage=Usage(
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
+                input_tokens=result.input_tokens,
+                output_tokens=result.output_tokens,
             ),
         )
 

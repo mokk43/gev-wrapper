@@ -4,12 +4,12 @@ import asyncio
 import json
 import math
 import sys
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, TypeVar, cast
 
 import httpx
 import torch
@@ -69,10 +69,16 @@ class AdmissionCapacityError(Exception):
     pass
 
 
-class InferenceCapacity:
+_OffloadResult = TypeVar("_OffloadResult")
+
+
+class DecisionCapacity:
     def __init__(self, *, backend_slots: int, admission_capacity: int) -> None:
         self._backend_slots = asyncio.Semaphore(backend_slots)
         self._admitted: asyncio.Queue[None] = asyncio.Queue(maxsize=admission_capacity)
+        self._offload_slots = asyncio.Semaphore(admission_capacity)
+        self._offload_tasks: set[asyncio.Task[Any]] = set()
+        self._closing = False
 
     @asynccontextmanager
     async def admit(self) -> AsyncIterator[None]:
@@ -89,6 +95,32 @@ class InferenceCapacity:
     async def backend_slot(self) -> AsyncIterator[None]:
         async with self._backend_slots:
             yield
+
+    async def run_offloaded(
+        self,
+        operation: Callable[[], _OffloadResult],
+    ) -> _OffloadResult:
+        await self._offload_slots.acquire()
+        if self._closing:
+            self._offload_slots.release()
+            raise RuntimeError("decision service is shutting down")
+        work_task = asyncio.create_task(asyncio.to_thread(operation))
+        self._offload_tasks.add(work_task)
+
+        def release_offload(completed: asyncio.Task[Any]) -> None:
+            if not completed.cancelled():
+                completed.exception()
+            self._offload_tasks.discard(completed)
+            self._offload_slots.release()
+
+        work_task.add_done_callback(release_offload)
+        return await asyncio.shield(work_task)
+
+    async def close(self) -> None:
+        self._closing = True
+        tasks = tuple(self._offload_tasks)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
 
 @dataclass(frozen=True)
@@ -112,6 +144,13 @@ class PreparedDecision:
 @dataclass(frozen=True)
 class BackendRow:
     log_probabilities: tuple[float, ...]
+    input_tokens: int
+    output_tokens: int
+
+
+@dataclass(frozen=True)
+class DecisionResult:
+    answers: dict[str, Answer]
     input_tokens: int
     output_tokens: int
 
@@ -328,7 +367,7 @@ def _parse_backend_row(
 
 async def _evaluate_row(
     client: httpx.AsyncClient,
-    capacity: InferenceCapacity,
+    capacity: DecisionCapacity,
     row: PreparedRow,
     label_token_ids: tuple[int, ...],
     bearer_token: str,
@@ -366,7 +405,9 @@ async def _evaluate_row(
                 raise CallerAuthenticationError(response.status_code)
             response.raise_for_status()
     except httpx.TimeoutException as exc:
-        raise TimeoutError from exc
+        if asyncio.get_running_loop().time() >= deadline:
+            raise TimeoutError from exc
+        raise BackendUnavailableError("backend request timed out") from exc
     except httpx.RequestError as exc:
         raise BackendUnavailableError("backend request failed") from exc
     except httpx.HTTPStatusError as exc:
@@ -464,14 +505,14 @@ async def evaluate_request(
     *,
     runtime: DecisionRuntime,
     client: httpx.AsyncClient,
-    capacity: InferenceCapacity,
+    capacity: DecisionCapacity,
     bearer_token: str,
     probability_coverage: int,
     deadline: float,
-) -> tuple[dict[str, Answer], int, int]:
-    prepared = await asyncio.to_thread(runtime.prepare, request)
+) -> DecisionResult:
+    prepared = await capacity.run_offloaded(lambda: runtime.prepare(request))
     if not prepared.rows:
-        return prepared.prepared_answers.copy(), 0, 0
+        return DecisionResult(prepared.prepared_answers.copy(), 0, 0)
     rows = await asyncio.gather(
         *(
             _evaluate_row(
@@ -486,9 +527,11 @@ async def evaluate_request(
             for row in prepared.rows
         )
     )
-    answers = await asyncio.to_thread(_calibrate_and_assemble, prepared, rows)
-    return (
-        answers,
-        sum(row.input_tokens for row in rows),
-        sum(row.output_tokens for row in rows),
+    answers = await capacity.run_offloaded(
+        lambda: _calibrate_and_assemble(prepared, rows)
+    )
+    return DecisionResult(
+        answers=answers,
+        input_tokens=sum(row.input_tokens for row in rows),
+        output_tokens=sum(row.output_tokens for row in rows),
     )

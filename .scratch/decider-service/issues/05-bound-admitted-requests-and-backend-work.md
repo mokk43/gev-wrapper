@@ -25,4 +25,5 @@ gates verify sanitized 503/504 responses, pending-row cancellation, caller
 disconnect cleanup, shutdown cleanup, and capacity reuse. Coverage recovery is
 still issue 07, but its attempts must retain the same capacity and deadline
 arguments. Cancelling local tasks cannot prove remote llama.cpp inference
-stopped, and already-running offloaded Python work cannot be forcibly stopped.
+stopped, and already-running offloaded Python work cannot be forcibly stopped;
+it retains a bounded offload slot and is awaited during shutdown.

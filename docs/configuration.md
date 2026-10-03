@@ -55,5 +55,6 @@ caller cancellation or disconnect, and shutdown cancel pending asyncio work and
 release per-process capacity. Cancelling an outstanding HTTP request closes the
 client-side operation but does not prove that llama.cpp stopped inference.
 Python cannot stop preparation or assembly already executing in a worker thread;
-the request stops awaiting that work, and the thread finishes under the event
-loop executor's lifecycle.
+the request stops awaiting that work, but it continues to occupy one of the
+`DECIDER_ADMISSION_CAPACITY`-bounded offload slots until completion. Shutdown
+awaits all tracked offloads before closing the service lifecycle.

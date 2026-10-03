@@ -1809,6 +1809,66 @@ async def test_backend_slots_bound_rows_within_one_request(
 
 
 @pytest.mark.anyio
+async def test_backend_slots_are_global_across_multi_row_callers(
+    metadata_directory: Path,
+) -> None:
+    global_limit_reached = asyncio.Event()
+    release_backend = asyncio.Event()
+    active = 0
+    maximum_active = 0
+    backend_requests = 0
+
+    async def backend(_request: httpx.Request) -> httpx.Response:
+        nonlocal active, maximum_active, backend_requests
+        backend_requests += 1
+        active += 1
+        maximum_active = max(maximum_active, active)
+        if active == 2:
+            global_limit_reached.set()
+        try:
+            await release_backend.wait()
+        finally:
+            active -= 1
+        return completion_response({1: 0.7, 2: 0.3})
+
+    app = create_app(
+        configured_settings(
+            metadata_directory,
+            backend_slots=2,
+            admission_capacity=4,
+        ),
+        backend_transport=httpx.MockTransport(backend),
+    )
+    payload = choice_request_payload()
+    payload["questions"]["owner"] = {
+        "type": "choice",
+        "criteria": {"support": None, "sales": None},
+    }
+
+    async with (
+        app.router.lifespan_context(app),
+        service_client(app) as client,
+    ):
+        callers = [
+            asyncio.create_task(
+                client.post(
+                    "/v1/systemone",
+                    headers={"Authorization": f"Bearer caller-{index}"},
+                    json=payload,
+                )
+            )
+            for index in range(2)
+        ]
+        await asyncio.wait_for(global_limit_reached.wait(), timeout=2)
+        release_backend.set()
+        responses = await asyncio.gather(*callers)
+
+    assert [response.status_code for response in responses] == [200, 200]
+    assert backend_requests == 4
+    assert maximum_active == 2
+
+
+@pytest.mark.anyio
 async def test_exhausted_admission_rejects_without_backend_work(
     metadata_directory: Path,
 ) -> None:
@@ -1936,7 +1996,7 @@ async def test_request_deadline_cancels_backend_work_and_releases_capacity(
 
 
 @pytest.mark.anyio
-async def test_request_budget_transport_timeout_returns_504(
+async def test_early_backend_transport_timeout_returns_503(
     metadata_directory: Path,
 ) -> None:
     def backend(request: httpx.Request) -> httpx.Response:
@@ -1957,9 +2017,185 @@ async def test_request_budget_transport_timeout_returns_504(
             json=choice_request_payload(),
         )
 
-    assert response.status_code == 504
-    assert response.json() == {"detail": "Decision request deadline expired."}
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Decision backend unavailable."}
     assert "remaining request budget expired" not in response.text
+
+
+@pytest.mark.anyio
+async def test_abandoned_preparation_remains_bounded_after_deadline(
+    metadata_directory: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = configured_settings(
+        metadata_directory,
+        backend_slots=1,
+        admission_capacity=1,
+        request_deadline_seconds=0.05,
+    )
+    runtime = DecisionRuntime(settings)
+    original_prepare = runtime.prepare
+    preparation_started = threading.Event()
+    preparation_finished = threading.Event()
+    release_preparation = threading.Event()
+    preparation_calls = 0
+
+    def gated_prepare(request: Any) -> Any:
+        nonlocal preparation_calls
+        preparation_calls += 1
+        if request.state == "blocked preparation":
+            preparation_started.set()
+            release_preparation.wait()
+            preparation_finished.set()
+        return original_prepare(request)
+
+    monkeypatch.setattr(runtime, "prepare", gated_prepare)
+
+    def backend(_request: httpx.Request) -> httpx.Response:
+        return completion_response({1: 0.7, 2: 0.3})
+
+    app = create_app(
+        settings,
+        backend_transport=httpx.MockTransport(backend),
+    )
+    blocked_payload = choice_request_payload()
+    blocked_payload["state"] = "blocked preparation"
+
+    try:
+        async with (
+            app.router.lifespan_context(app),
+            service_client(app) as client,
+        ):
+            app.state.decision_runtime = runtime
+            first_request = asyncio.create_task(
+                client.post(
+                    "/v1/systemone",
+                    headers={"Authorization": "Bearer first-key"},
+                    json=blocked_payload,
+                )
+            )
+            await asyncio.wait_for(
+                asyncio.to_thread(preparation_started.wait),
+                timeout=2,
+            )
+            first_expired = await asyncio.wait_for(first_request, timeout=2)
+            second_expired = await asyncio.wait_for(
+                client.post(
+                    "/v1/systemone",
+                    headers={"Authorization": "Bearer second-key"},
+                    json=blocked_payload,
+                ),
+                timeout=2,
+            )
+
+            assert first_expired.status_code == 504
+            assert second_expired.status_code == 504
+            assert preparation_calls == 1
+
+            release_preparation.set()
+            await asyncio.wait_for(
+                asyncio.to_thread(preparation_finished.wait),
+                timeout=2,
+            )
+            after_release = await client.post(
+                "/v1/systemone",
+                headers={"Authorization": "Bearer next-key"},
+                json=choice_request_payload(),
+            )
+
+        assert after_release.status_code == 200
+        assert preparation_calls == 2
+    finally:
+        release_preparation.set()
+
+
+@pytest.mark.anyio
+async def test_assembly_deadline_releases_request_capacity_but_bounds_offload(
+    metadata_directory: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = configured_settings(
+        metadata_directory,
+        backend_slots=1,
+        admission_capacity=1,
+        request_deadline_seconds=0.05,
+    )
+    runtime = DecisionRuntime(settings)
+    original_assemble = decision_module._calibrate_and_assemble
+    assembly_started = threading.Event()
+    assembly_finished = threading.Event()
+    release_assembly = threading.Event()
+    assembly_calls = 0
+    backend_keys: list[str] = []
+
+    def gated_assemble(*args: Any, **kwargs: Any) -> Any:
+        nonlocal assembly_calls
+        assembly_calls += 1
+        if assembly_calls == 1:
+            assembly_started.set()
+            release_assembly.wait()
+            assembly_finished.set()
+        return original_assemble(*args, **kwargs)
+
+    monkeypatch.setattr(decision_module, "_calibrate_and_assemble", gated_assemble)
+
+    def backend(request: httpx.Request) -> httpx.Response:
+        backend_keys.append(request.headers["Authorization"])
+        return completion_response({1: 0.7, 2: 0.3})
+
+    app = create_app(
+        settings,
+        backend_transport=httpx.MockTransport(backend),
+    )
+
+    try:
+        async with (
+            app.router.lifespan_context(app),
+            service_client(app) as client,
+        ):
+            app.state.decision_runtime = runtime
+            first_request = asyncio.create_task(
+                client.post(
+                    "/v1/systemone",
+                    headers={"Authorization": "Bearer first-key"},
+                    json=choice_request_payload(),
+                )
+            )
+            await asyncio.wait_for(
+                asyncio.to_thread(assembly_started.wait),
+                timeout=2,
+            )
+            first_expired = await asyncio.wait_for(first_request, timeout=2)
+            second_expired = await asyncio.wait_for(
+                client.post(
+                    "/v1/systemone",
+                    headers={"Authorization": "Bearer second-key"},
+                    json=choice_request_payload(),
+                ),
+                timeout=2,
+            )
+
+            assert first_expired.status_code == 504
+            assert second_expired.status_code == 504
+            assert assembly_calls == 1
+            assert backend_keys == ["Bearer first-key"]
+
+            release_assembly.set()
+            await asyncio.wait_for(
+                asyncio.to_thread(assembly_finished.wait),
+                timeout=2,
+            )
+            after_release = await client.post(
+                "/v1/systemone",
+                headers={"Authorization": "Bearer next-key"},
+                json=choice_request_payload(),
+            )
+
+        assert after_release.status_code == 200
+        assert assembly_calls == 2
+        assert backend_keys == ["Bearer first-key", "Bearer next-key"]
+    finally:
+        release_assembly.set()
 
 
 @pytest.mark.anyio
@@ -2004,6 +2240,69 @@ async def test_shutdown_cancels_inflight_backend_work(
             request_task.cancel()
         if request_task is not None:
             await asyncio.gather(request_task, return_exceptions=True)
+        await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_shutdown_awaits_abandoned_offloaded_work(
+    metadata_directory: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = configured_settings(
+        metadata_directory,
+        backend_slots=1,
+        admission_capacity=1,
+        request_deadline_seconds=0.05,
+    )
+    runtime = DecisionRuntime(settings)
+    original_prepare = runtime.prepare
+    preparation_started = threading.Event()
+    preparation_finished = threading.Event()
+    release_preparation = threading.Event()
+
+    def gated_prepare(request: Any) -> Any:
+        preparation_started.set()
+        release_preparation.wait()
+        result = original_prepare(request)
+        preparation_finished.set()
+        return result
+
+    monkeypatch.setattr(runtime, "prepare", gated_prepare)
+
+    app = create_app(
+        settings,
+        backend_transport=httpx.MockTransport(
+            lambda _request: completion_response({1: 0.7, 2: 0.3})
+        ),
+    )
+    lifespan = app.router.lifespan_context(app)
+    await lifespan.__aenter__()
+    app.state.decision_runtime = runtime
+    client = service_client(app)
+    shutdown_task: asyncio.Task[bool | None] | None = None
+    try:
+        response = await client.post(
+            "/v1/systemone",
+            headers={"Authorization": "Bearer caller-key"},
+            json=choice_request_payload(),
+        )
+        await asyncio.wait_for(
+            asyncio.to_thread(preparation_started.wait),
+            timeout=2,
+        )
+        assert response.status_code == 504
+
+        shutdown_task = asyncio.create_task(lifespan.__aexit__(None, None, None))
+        await asyncio.sleep(0)
+        assert not shutdown_task.done()
+
+        release_preparation.set()
+        await asyncio.wait_for(shutdown_task, timeout=2)
+        assert preparation_finished.is_set()
+    finally:
+        release_preparation.set()
+        if shutdown_task is not None and not shutdown_task.done():
+            await asyncio.wait_for(shutdown_task, timeout=2)
         await client.aclose()
 
 

@@ -12,3 +12,11 @@
 - [ ] Backend rejection of the forwarded caller key maps to a public authentication failure consistent with the pinned TypeSafe clients. Operator startup probe-key rejection remains a readiness failure; transport/backend unavailability remains 503. Verify exact authentication statuses and non-validation error bodies against the pinned contract and client behavior rather than guessing hosted-platform fidelity.
 - [ ] Retain request identifiers and concise operational diagnostics while omitting request bodies, State, prompts, and credentials from logs. Sanitize backend error bodies, exceptions, and startup diagnostics so sensitive upstream content cannot escape.
 - [ ] Public HTTP and captured-log checks cover loopback/network configuration, valid, missing, malformed, and backend-rejected caller credentials on both endpoints, validation/backend/unavailable/overload/deadline errors, and request isolation. Concurrent requests with different keys and coverage retries always forward the originating caller's key; a configured probe key cannot satisfy runtime authentication. Inject recognizable evidence and secret markers in controlled failures and confirm none appear in public errors or operational logs.
+
+## Comments
+
+Partial implementation on 2026-10-03 now maps backend 401 and 403 responses to
+sanitized public authentication failures with the same status. Exact behavior
+still requires verification against the selected backend and pinned TypeSafe
+client. Catalog authentication, request identifiers, captured-log checks, and
+the remaining operational error boundary are still open.

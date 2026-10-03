@@ -4,6 +4,8 @@ import asyncio
 import json
 import math
 import sys
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -45,6 +47,40 @@ class BackendContractError(Exception):
 
 class BackendUnavailableError(Exception):
     pass
+
+
+class CallerAuthenticationError(Exception):
+    def __init__(self, status_code: int) -> None:
+        super().__init__("backend rejected caller credentials")
+        self.status_code = status_code
+
+
+class AdmissionCapacityError(Exception):
+    pass
+
+
+class InferenceCapacity:
+    def __init__(self, *, backend_slots: int, admission_capacity: int) -> None:
+        self._backend_slots = asyncio.Semaphore(backend_slots)
+        self._admitted: asyncio.Queue[None] = asyncio.Queue(
+            maxsize=admission_capacity
+        )
+
+    @asynccontextmanager
+    async def admit(self) -> AsyncIterator[None]:
+        try:
+            self._admitted.put_nowait(None)
+        except asyncio.QueueFull as exc:
+            raise AdmissionCapacityError from exc
+        try:
+            yield
+        finally:
+            self._admitted.get_nowait()
+
+    @asynccontextmanager
+    async def backend_slot(self) -> AsyncIterator[None]:
+        async with self._backend_slots:
+            yield
 
 
 @dataclass(frozen=True)
@@ -140,7 +176,7 @@ class DecisionRuntime:
                 or not isinstance(option_counts[0], int)
                 or slots != [len(token_ids) - 1]
             ):
-                raise RuntimeError(
+                raise BackendContractError(
                     "Pinned Decider preparation did not produce one final answer slot"
                 )
             if len(token_ids) + 1 > self._context_capacity:
@@ -234,6 +270,7 @@ def _parse_backend_row(
 
 async def _evaluate_row(
     client: httpx.AsyncClient,
+    capacity: InferenceCapacity,
     row: PreparedRow,
     label_token_ids: tuple[int, ...],
     bearer_token: str,
@@ -256,12 +293,15 @@ async def _evaluate_row(
         "stream": False,
     }
     try:
-        response = await client.post(
-            "/completion",
-            headers={"Authorization": f"Bearer {bearer_token}"},
-            json=payload,
-        )
-        response.raise_for_status()
+        async with capacity.backend_slot():
+            response = await client.post(
+                "/completion",
+                headers={"Authorization": f"Bearer {bearer_token}"},
+                json=payload,
+            )
+            if response.status_code in {401, 403}:
+                raise CallerAuthenticationError(response.status_code)
+            response.raise_for_status()
     except httpx.RequestError as exc:
         raise BackendUnavailableError("backend request failed") from exc
     except httpx.HTTPStatusError as exc:
@@ -329,6 +369,7 @@ async def evaluate_choice_request(
     *,
     runtime: DecisionRuntime,
     client: httpx.AsyncClient,
+    capacity: InferenceCapacity,
     bearer_token: str,
     probability_coverage: int,
 ) -> tuple[dict[str, ChoiceAnswer], int, int]:
@@ -337,6 +378,7 @@ async def evaluate_choice_request(
         *(
             _evaluate_row(
                 client,
+                capacity,
                 row,
                 prepared.label_token_ids,
                 bearer_token,
@@ -345,7 +387,7 @@ async def evaluate_choice_request(
             for row in prepared.rows
         )
     )
-    answers = _calibrate_and_assemble(prepared, rows)
+    answers = await asyncio.to_thread(_calibrate_and_assemble, prepared, rows)
     return (
         answers,
         sum(row.input_tokens for row in rows),

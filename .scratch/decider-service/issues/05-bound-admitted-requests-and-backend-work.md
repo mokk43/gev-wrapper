@@ -12,3 +12,11 @@
 - [ ] On deadline expiry or caller cancellation/disconnect where supported, stop scheduling further rows and attempts, cancel pending tasks, and close outstanding client requests. Release service capacity and account for the limits of cancelling offloaded preparation; a closed connection must not be reported as proof that remote backend inference stopped.
 - [ ] Service shutdown manages pending tasks and closes the shared client without leaking admission/evaluation capacity or leaving unmanaged client requests.
 - [ ] Public HTTP checks use deterministic backend gates/events to verify the global bound across simultaneous callers and multiple rows, bounded overload, deadlines spanning queueing/preparation/evaluation/assembly, cancellation, and shutdown cleanup. Verify released capacity can serve subsequent callers; timing-only sleeps are insufficient evidence.
+
+## Comments
+
+Partial implementation on 2026-10-03 now enforces per-process backend slots
+and non-waiting request admission, returning sanitized 503 on exhaustion.
+Deterministic public checks cover multiple rows, overlapping callers, and
+capacity release. Deadlines, disconnect/cancellation behavior, retry controls,
+and shutdown cleanup remain open, so this ticket is not complete.

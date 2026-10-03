@@ -4,9 +4,10 @@ import asyncio
 import json
 import math
 import string
+import threading
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -14,8 +15,10 @@ from fastapi import FastAPI
 from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import PreTrainedTokenizerFast
 
+import decider_service.decision as decision_module
 from decider_service.app import create_app
 from decider_service.config import Settings
+from decider_service.decision import DecisionRuntime
 
 
 @pytest.fixture
@@ -85,6 +88,19 @@ def service_client(app: FastAPI) -> httpx.AsyncClient:
         transport=httpx.ASGITransport(app=app),
         base_url="http://test",
     )
+
+
+def choice_request_payload() -> dict[str, Any]:
+    return {
+        "model": "decider-4b-q4-k-m",
+        "state": "evidence",
+        "questions": {
+            "priority": {
+                "type": "choice",
+                "criteria": {"urgent": None, "routine": None},
+            }
+        },
+    }
 
 
 def completion_response(
@@ -869,3 +885,288 @@ async def test_neutralized_option_maps_back_to_the_requested_label(
     }
     assert "not listed here" in rendered_prompt
     assert " none " not in f" {rendered_prompt} "
+
+
+@pytest.mark.anyio
+async def test_oversized_content_length_is_rejected_before_reading_the_body(
+    metadata_directory: Path,
+) -> None:
+    emitted_chunks: list[bytes] = []
+
+    async def body() -> Any:
+        chunk = b"x" * 128
+        emitted_chunks.append(chunk)
+        yield chunk
+
+    app = create_app(
+        configured_settings(metadata_directory, max_request_bytes=64),
+    )
+
+    async with service_client(app) as client:
+        response = await client.post(
+            "/v1/systemone",
+            headers={
+                "Authorization": "Bearer caller-key",
+                "Content-Length": "128",
+                "Content-Type": "application/json",
+            },
+            content=body(),
+        )
+
+    assert response.status_code == 422
+    assert emitted_chunks == []
+
+
+@pytest.mark.anyio
+async def test_chunked_oversized_body_stops_consuming_at_the_limit(
+    metadata_directory: Path,
+) -> None:
+    chunks = [b"123456", b"789012", b"unread-tail"]
+    emitted_chunks: list[bytes] = []
+
+    async def body() -> Any:
+        for chunk in chunks:
+            emitted_chunks.append(chunk)
+            yield chunk
+
+    app = create_app(
+        configured_settings(metadata_directory, max_request_bytes=10),
+    )
+
+    async with service_client(app) as client:
+        response = await client.post(
+            "/v1/systemone",
+            headers={
+                "Authorization": "Bearer caller-key",
+                "Content-Type": "application/json",
+            },
+            content=body(),
+        )
+
+    assert response.status_code == 422
+    assert emitted_chunks == chunks[:2]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("backend_status", [401, 403])
+async def test_backend_credential_rejection_is_a_public_authentication_error(
+    metadata_directory: Path,
+    backend_status: int,
+) -> None:
+    def backend(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            backend_status,
+            json={"error": "upstream secret diagnostic"},
+        )
+
+    app = create_app(
+        configured_settings(metadata_directory),
+        backend_transport=httpx.MockTransport(backend),
+    )
+
+    async with (
+        app.router.lifespan_context(app),
+        service_client(app) as client,
+    ):
+        response = await client.post(
+            "/v1/systemone",
+            headers={"Authorization": "Bearer rejected-key"},
+            json=choice_request_payload(),
+        )
+
+    assert response.status_code == backend_status
+    assert response.json() == {"detail": "Backend rejected caller credentials."}
+    assert "upstream secret diagnostic" not in response.text
+    assert "rejected-key" not in response.text
+
+
+@pytest.mark.anyio
+async def test_backend_slots_bound_rows_within_one_request(
+    metadata_directory: Path,
+) -> None:
+    first_started = asyncio.Event()
+    release = asyncio.Event()
+    active = 0
+    maximum_active = 0
+
+    async def backend(_request: httpx.Request) -> httpx.Response:
+        nonlocal active, maximum_active
+        active += 1
+        maximum_active = max(maximum_active, active)
+        first_started.set()
+        await release.wait()
+        active -= 1
+        return completion_response({1: 0.7, 2: 0.3})
+
+    app = create_app(
+        configured_settings(
+            metadata_directory,
+            backend_slots=1,
+            admission_capacity=2,
+        ),
+        backend_transport=httpx.MockTransport(backend),
+    )
+    payload = choice_request_payload()
+    payload["questions"]["owner"] = {
+        "type": "choice",
+        "criteria": {"support": None, "sales": None},
+    }
+
+    async def release_after_first_starts() -> None:
+        await first_started.wait()
+        await asyncio.sleep(0)
+        release.set()
+
+    async with (
+        app.router.lifespan_context(app),
+        service_client(app) as client,
+    ):
+        release_task = asyncio.create_task(release_after_first_starts())
+        response = await client.post(
+            "/v1/systemone",
+            headers={"Authorization": "Bearer caller-key"},
+            json=payload,
+        )
+        await release_task
+
+    assert response.status_code == 200
+    assert maximum_active == 1
+
+
+@pytest.mark.anyio
+async def test_exhausted_admission_rejects_without_backend_work(
+    metadata_directory: Path,
+) -> None:
+    slow_started = asyncio.Event()
+    release_slow = asyncio.Event()
+    backend_keys: list[str] = []
+
+    async def backend(request: httpx.Request) -> httpx.Response:
+        key = request.headers["Authorization"]
+        backend_keys.append(key)
+        if key == "Bearer slow-key":
+            slow_started.set()
+            await release_slow.wait()
+        return completion_response({1: 0.7, 2: 0.3})
+
+    app = create_app(
+        configured_settings(
+            metadata_directory,
+            backend_slots=1,
+            admission_capacity=1,
+        ),
+        backend_transport=httpx.MockTransport(backend),
+    )
+
+    async with (
+        app.router.lifespan_context(app),
+        service_client(app) as client,
+    ):
+        slow_task = asyncio.create_task(
+            client.post(
+                "/v1/systemone",
+                headers={"Authorization": "Bearer slow-key"},
+                json=choice_request_payload(),
+            )
+        )
+        await slow_started.wait()
+        rejected = await asyncio.wait_for(
+            client.post(
+                "/v1/systemone",
+                headers={"Authorization": "Bearer rejected-key"},
+                json=choice_request_payload(),
+            ),
+            timeout=2,
+        )
+        release_slow.set()
+        completed = await slow_task
+        after_release = await client.post(
+            "/v1/systemone",
+            headers={"Authorization": "Bearer next-key"},
+            json=choice_request_payload(),
+        )
+
+    assert completed.status_code == 200
+    assert rejected.status_code == 503
+    assert rejected.json() == {"detail": "Decision service is at capacity."}
+    assert after_release.status_code == 200
+    assert backend_keys == ["Bearer slow-key", "Bearer next-key"]
+
+
+@pytest.mark.anyio
+async def test_invalid_preparation_shape_returns_a_sanitized_502(
+    metadata_directory: Path,
+) -> None:
+    class InvalidPreparation:
+        def _system_one_items(self, *_args: object, **_kwargs: object) -> object:
+            return (
+                {"priority": {}},
+                [("priority", "list", 0, 1)],
+                [{"ids": [1], "slots": [], "nopts": [2], "types": ["choice"]}],
+            )
+
+    settings = configured_settings(metadata_directory)
+    runtime = DecisionRuntime(settings)
+    runtime._decider = cast(Any, InvalidPreparation())
+
+    def backend(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("invalid preparation must fail before backend work")
+
+    app = create_app(
+        settings,
+        backend_transport=httpx.MockTransport(backend),
+    )
+
+    async with (
+        app.router.lifespan_context(app),
+        service_client(app) as client,
+    ):
+        app.state.decision_runtime = runtime
+        response = await client.post(
+            "/v1/systemone",
+            headers={"Authorization": "Bearer caller-key"},
+            json=choice_request_payload(),
+        )
+
+    assert response.status_code == 502
+    assert response.json() == {
+        "detail": "Backend response did not satisfy the inference contract."
+    }
+
+
+@pytest.mark.anyio
+async def test_calibration_and_assembly_run_off_the_event_loop(
+    metadata_directory: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop_thread = threading.get_ident()
+    worker_threads: list[int] = []
+    original = decision_module._calibrate_and_assemble
+
+    def record_thread(*args: Any, **kwargs: Any) -> Any:
+        worker_threads.append(threading.get_ident())
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(decision_module, "_calibrate_and_assemble", record_thread)
+
+    def backend(_request: httpx.Request) -> httpx.Response:
+        return completion_response({1: 0.7, 2: 0.3})
+
+    app = create_app(
+        configured_settings(metadata_directory),
+        backend_transport=httpx.MockTransport(backend),
+    )
+
+    async with (
+        app.router.lifespan_context(app),
+        service_client(app) as client,
+    ):
+        response = await client.post(
+            "/v1/systemone",
+            headers={"Authorization": "Bearer caller-key"},
+            json=choice_request_payload(),
+        )
+
+    assert response.status_code == 200
+    assert worker_threads
+    assert worker_threads[0] != loop_thread

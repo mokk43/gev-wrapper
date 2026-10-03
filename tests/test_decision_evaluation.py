@@ -1014,78 +1014,47 @@ async def test_concurrent_noul_callers_keep_results_usage_and_credentials_isolat
 
 
 @pytest.mark.anyio
-async def test_question_prompt_is_unchanged_when_other_questions_are_reordered(
+@pytest.mark.parametrize(
+    ("target_name", "target", "independent_name", "independent"),
+    [
+        pytest.param(
+            "priority",
+            {
+                "type": "choice",
+                "instructions": "Choose priority.",
+                "criteria": {"urgent": None, "routine": None},
+            },
+            "owner",
+            {
+                "type": "choice",
+                "instructions": "Choose owner using more words.",
+                "criteria": {"support": None, "sales": None},
+            },
+            id="choice",
+        ),
+        pytest.param(
+            "check",
+            {
+                "type": "noul",
+                "instructions": "Is this request urgent?",
+                "criteria": {"true": "urgent", "false": "routine"},
+            },
+            "owner",
+            {
+                "type": "choice",
+                "instructions": "Choose an owner.",
+                "criteria": {"support": None, "sales": None},
+            },
+            id="noul",
+        ),
+    ],
+)
+async def test_question_is_unchanged_when_independent_questions_are_reordered(
     metadata_directory: Path,
-) -> None:
-    backend_requests: list[httpx.Request] = []
-
-    def backend(request: httpx.Request) -> httpx.Response:
-        backend_requests.append(request)
-        return completion_response({1: 0.7, 2: 0.3})
-
-    app = create_app(
-        configured_settings(metadata_directory),
-        backend_transport=httpx.MockTransport(backend),
-    )
-    priority = {
-        "type": "choice",
-        "instructions": "Choose priority.",
-        "criteria": {"urgent": None, "routine": None},
-    }
-    owner = {
-        "type": "choice",
-        "instructions": "Choose owner for this request using more words.",
-        "criteria": {"support": None, "sales": None},
-    }
-
-    async with (
-        app.router.lifespan_context(app),
-        service_client(app) as client,
-    ):
-        first = await client.post(
-            "/v1/systemone",
-            headers={"Authorization": "Bearer caller-key"},
-            json={
-                "model": "decider-4b-q4-k-m",
-                "state": "same evidence",
-                "questions": {"priority": priority},
-            },
-        )
-        second = await client.post(
-            "/v1/systemone",
-            headers={"Authorization": "Bearer caller-key"},
-            json={
-                "model": "decider-4b-q4-k-m",
-                "state": "same evidence",
-                "questions": {"owner": owner, "priority": priority},
-            },
-        )
-        reordered = await client.post(
-            "/v1/systemone",
-            headers={"Authorization": "Bearer caller-key"},
-            json={
-                "model": "decider-4b-q4-k-m",
-                "state": "same evidence",
-                "questions": {"priority": priority, "owner": owner},
-            },
-        )
-
-    assert first.status_code == 200
-    assert second.status_code == 200
-    assert reordered.status_code == 200
-    prompts = [json.loads(request.content)["prompt"] for request in backend_requests]
-    assert prompts[0] == prompts[2] == prompts[3]
-    assert first.json()["answers"]["priority"] == second.json()["answers"][
-        "priority"
-    ]
-    assert first.json()["answers"]["priority"] == reordered.json()["answers"][
-        "priority"
-    ]
-
-
-@pytest.mark.anyio
-async def test_noul_is_unchanged_when_an_independent_question_is_added_first(
-    metadata_directory: Path,
+    target_name: str,
+    target: dict[str, Any],
+    independent_name: str,
+    independent: dict[str, Any],
 ) -> None:
     backend_requests: list[httpx.Request] = []
 
@@ -1097,17 +1066,6 @@ async def test_noul_is_unchanged_when_an_independent_question_is_added_first(
         configured_settings(metadata_directory),
         backend_transport=httpx.MockTransport(backend),
     )
-    check = {
-        "type": "noul",
-        "instructions": "Is this request urgent?",
-        "criteria": {"true": "urgent", "false": "routine"},
-    }
-    owner = {
-        "type": "choice",
-        "instructions": "Choose an owner.",
-        "criteria": {"support": None, "sales": None},
-    }
-
     async with (
         app.router.lifespan_context(app),
         service_client(app) as client,
@@ -1118,7 +1076,7 @@ async def test_noul_is_unchanged_when_an_independent_question_is_added_first(
             json={
                 "model": "decider-4b-q4-k-m",
                 "state": "same evidence",
-                "questions": {"check": check},
+                "questions": {target_name: target},
             },
         )
         second = await client.post(
@@ -1127,7 +1085,10 @@ async def test_noul_is_unchanged_when_an_independent_question_is_added_first(
             json={
                 "model": "decider-4b-q4-k-m",
                 "state": "same evidence",
-                "questions": {"owner": owner, "check": check},
+                "questions": {
+                    independent_name: independent,
+                    target_name: target,
+                },
             },
         )
         reordered = await client.post(
@@ -1136,7 +1097,10 @@ async def test_noul_is_unchanged_when_an_independent_question_is_added_first(
             json={
                 "model": "decider-4b-q4-k-m",
                 "state": "same evidence",
-                "questions": {"check": check, "owner": owner},
+                "questions": {
+                    target_name: target,
+                    independent_name: independent,
+                },
             },
         )
 
@@ -1145,9 +1109,11 @@ async def test_noul_is_unchanged_when_an_independent_question_is_added_first(
     assert reordered.status_code == 200
     prompts = [json.loads(request.content)["prompt"] for request in backend_requests]
     assert prompts[0] == prompts[2] == prompts[3]
-    assert first.json()["answers"]["check"] == second.json()["answers"]["check"]
-    assert first.json()["answers"]["check"] == reordered.json()["answers"][
-        "check"
+    assert first.json()["answers"][target_name] == second.json()["answers"][
+        target_name
+    ]
+    assert first.json()["answers"][target_name] == reordered.json()["answers"][
+        target_name
     ]
 
 

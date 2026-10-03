@@ -666,6 +666,13 @@ async def test_noul_accepts_optional_fields_and_preserves_structured_values(
                 "false": ["false-marker"],
             },
         },
+        {"type": "noul", "criteria": {"true": ["true-marker"]}},
+        {"type": "noul", "criteria": {"false": ["false-marker"]}},
+        {
+            "type": "noul",
+            "instructions": "Is this true?",
+            "criteria": {"true": None, "false": None},
+        },
         {"type": "noul", "instructions": None, "criteria": None},
         {"type": "noul"},
     ]
@@ -687,7 +694,7 @@ async def test_noul_accepts_optional_fields_and_preserves_structured_values(
             for question in questions
         ]
 
-    assert [response.status_code for response in responses] == [200] * 5
+    assert [response.status_code for response in responses] == [200] * 8
     assert all(
         response.json()["answers"] == {
             "check": {"type": "noul", "noul": 0.4}
@@ -699,6 +706,8 @@ async def test_noul_accepts_optional_fields_and_preserves_structured_values(
     assert '["instruction-marker"]' in structured_prompt
     assert '["true-marker"]' in structured_prompt
     assert '["false-marker"]' in structured_prompt
+    assert '["true-marker"]' in tokenizer.decode(backend_prompts[3])
+    assert '["false-marker"]' in tokenizer.decode(backend_prompts[4])
 
 
 @pytest.mark.anyio
@@ -1051,12 +1060,25 @@ async def test_question_prompt_is_unchanged_when_other_questions_are_reordered(
                 "questions": {"owner": owner, "priority": priority},
             },
         )
+        reordered = await client.post(
+            "/v1/systemone",
+            headers={"Authorization": "Bearer caller-key"},
+            json={
+                "model": "decider-4b-q4-k-m",
+                "state": "same evidence",
+                "questions": {"priority": priority, "owner": owner},
+            },
+        )
 
     assert first.status_code == 200
     assert second.status_code == 200
+    assert reordered.status_code == 200
     prompts = [json.loads(request.content)["prompt"] for request in backend_requests]
-    assert prompts[0] == prompts[2]
+    assert prompts[0] == prompts[2] == prompts[3]
     assert first.json()["answers"]["priority"] == second.json()["answers"][
+        "priority"
+    ]
+    assert first.json()["answers"]["priority"] == reordered.json()["answers"][
         "priority"
     ]
 
@@ -1108,12 +1130,25 @@ async def test_noul_is_unchanged_when_an_independent_question_is_added_first(
                 "questions": {"owner": owner, "check": check},
             },
         )
+        reordered = await client.post(
+            "/v1/systemone",
+            headers={"Authorization": "Bearer caller-key"},
+            json={
+                "model": "decider-4b-q4-k-m",
+                "state": "same evidence",
+                "questions": {"check": check, "owner": owner},
+            },
+        )
 
     assert first.status_code == 200
     assert second.status_code == 200
+    assert reordered.status_code == 200
     prompts = [json.loads(request.content)["prompt"] for request in backend_requests]
-    assert prompts[0] == prompts[2]
+    assert prompts[0] == prompts[2] == prompts[3]
     assert first.json()["answers"]["check"] == second.json()["answers"]["check"]
+    assert first.json()["answers"]["check"] == reordered.json()["answers"][
+        "check"
+    ]
 
 
 @pytest.mark.anyio

@@ -88,13 +88,16 @@ Application lifespan completes only after all checks pass. The gate:
 - proves that invalid bearer credentials are rejected by both `/v1/models` and
   `/completion`, while the operator probe credential is accepted;
 - sends one synthetic two-option Decider row with prompt caching disabled and
-  the configured maximum probability coverage, then validates final-slot
-  probability shape, required option IDs, and counters.
+  the configured maximum probability coverage, sets `min_keep` to that same
+  bound, then validates final-slot probability shape, required option IDs, and
+  counters. Runtime requests likewise set `min_keep` to their requested
+  coverage.
 
 For disabled prompt caching, the supported counter interpretation is
 `tokens_evaluated == submitted raw prompt token count`,
 `tokens_predicted == 1`, and `tokens_cached == 0` for the startup fixture.
-Runtime usage sums those request-local input/output counters across rows. A
+Runtime responses also reject missing or nonzero `tokens_cached`; usage sums
+the request-local input/output counters across rows. A
 selected build that does not expose the documented `/v1/models`, `/props`,
 `/detokenize`, `/tokenize`, and `/completion` shapes is unsupported and fails
 startup.

@@ -65,6 +65,7 @@ async def test_startup_verifies_backend_before_serving_inference(
                         ]
                     }
                 ],
+                "tokens_cached": 0,
                 "tokens_evaluated": 11,
                 "tokens_predicted": 1,
                 "truncated": False,
@@ -121,6 +122,11 @@ async def test_startup_verifies_backend_before_serving_inference(
     assert all(len(chunk) <= 128 for chunk in tokenizer_probes)
     assert [token_id for chunk in tokenizer_probes for token_id in chunk] == list(
         range(703)
+    )
+    assert all(
+        json.loads(request.content)["parse_special"] is True
+        for request in backend.requests
+        if request.url.path == "/tokenize"
     )
 
 
@@ -324,6 +330,67 @@ async def test_startup_rejects_out_of_vocabulary_probability_token_ids(
 
 
 @pytest.mark.anyio
+async def test_startup_rejects_probability_coverage_without_required_option_id(
+    metadata_directory: Path,
+) -> None:
+    backend = ControlledBackend(metadata_directory)
+
+    def missing_option(request: httpx.Request) -> httpx.Response:
+        if (
+            request.url.path == "/completion"
+            and request.headers.get("Authorization") == f"Bearer {PROBE_KEY}"
+        ):
+            body = backend(request).json()
+            body["probs"][0]["top_logprobs"][2]["id"] = 512
+            return httpx.Response(200, json=body)
+        return backend(request)
+
+    await assert_startup_fails(
+        metadata_directory,
+        httpx.MockTransport(missing_option),
+        "probability or counter contract is incompatible",
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("counter", "value", "message"),
+    [
+        (
+            "tokens_predicted",
+            2,
+            "probability or counter contract is incompatible",
+        ),
+        ("tokens_cached", 1, "counters do not represent uncached prompt"),
+        ("tokens_evaluated", 1, "counters do not represent uncached prompt"),
+    ],
+)
+async def test_startup_rejects_incompatible_counter_semantics(
+    metadata_directory: Path,
+    counter: str,
+    value: int,
+    message: str,
+) -> None:
+    backend = ControlledBackend(metadata_directory)
+
+    def incompatible_counter(request: httpx.Request) -> httpx.Response:
+        if (
+            request.url.path == "/completion"
+            and request.headers.get("Authorization") == f"Bearer {PROBE_KEY}"
+        ):
+            body = backend(request).json()
+            body[counter] = value
+            return httpx.Response(200, json=body)
+        return backend(request)
+
+    await assert_startup_fails(
+        metadata_directory,
+        httpx.MockTransport(incompatible_counter),
+        message,
+    )
+
+
+@pytest.mark.anyio
 async def test_startup_health_attempts_are_bounded(
     metadata_directory: Path,
 ) -> None:
@@ -343,6 +410,28 @@ async def test_startup_health_attempts_are_bounded(
         "did not become ready after 3 bounded attempts",
     )
     assert attempts == 3
+
+
+@pytest.mark.anyio
+async def test_startup_rejects_transport_failure_after_health_check(
+    metadata_directory: Path,
+) -> None:
+    attempts = 0
+    backend = ControlledBackend(metadata_directory)
+
+    def unavailable(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        if request.url.path == "/props":
+            attempts += 1
+            raise httpx.ConnectError("backend disconnected", request=request)
+        return backend(request)
+
+    await assert_startup_fails(
+        metadata_directory,
+        httpx.MockTransport(unavailable),
+        "backend /props was unavailable during startup",
+    )
+    assert attempts == 1
 
 
 @pytest.mark.anyio
@@ -395,6 +484,29 @@ async def test_startup_rejects_insufficient_effective_context_capacity(
         metadata_directory,
         httpx.MockTransport(insufficient_context),
         "effective context capacity is smaller",
+    )
+
+
+@pytest.mark.anyio
+async def test_startup_rejects_insufficient_backend_slot_capacity(
+    metadata_directory: Path,
+) -> None:
+    backend = ControlledBackend(metadata_directory)
+
+    def insufficient_slots(request: httpx.Request) -> httpx.Response:
+        if (
+            request.url.path == "/props"
+            and request.headers.get("Authorization") == f"Bearer {PROBE_KEY}"
+        ):
+            body = backend(request).json()
+            body["total_slots"] = 1
+            return httpx.Response(200, json=body)
+        return backend(request)
+
+    await assert_startup_fails(
+        metadata_directory,
+        httpx.MockTransport(insufficient_slots),
+        "slot capacity is smaller than configured backend_slots",
     )
 
 

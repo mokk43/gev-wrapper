@@ -65,6 +65,10 @@ class BackendProbabilityDataError(BackendContractError):
     pass
 
 
+class BackendCounterSemanticsError(BackendContractError):
+    pass
+
+
 class BackendTokenIdentityError(BackendContractError):
     pass
 
@@ -452,8 +456,13 @@ def parse_backend_row(
 
     input_tokens = _required_nonnegative_integer(typed_body, "tokens_evaluated")
     output_tokens = _required_nonnegative_integer(typed_body, "tokens_predicted")
+    cached_tokens = _required_nonnegative_integer(typed_body, "tokens_cached")
     if output_tokens != 1:
         raise BackendContractError("backend returned an unexpected prediction count")
+    if cached_tokens != 0:
+        raise BackendCounterSemanticsError(
+            "backend returned cached work when prompt caching was disabled"
+        )
     if typed_body.get("truncated") is True:
         raise BackendContractError("backend truncated a rendered prompt")
     return BackendRow(probabilities, input_tokens, output_tokens)
@@ -507,6 +516,7 @@ def completion_payload(
         "n_predict": 1,
         "temperature": -1.0,
         "n_probs": probability_coverage,
+        "min_keep": probability_coverage,
         "post_sampling_probs": False,
         "repeat_penalty": 1.0,
         "presence_penalty": 0.0,

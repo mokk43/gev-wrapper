@@ -196,15 +196,17 @@ class ControlledBackend:
             )
         if request.url.path == "/tokenize":
             body = json.loads(request.content)
-            return httpx.Response(
-                200,
-                json={
-                    "tokens": self.tokenizer.encode(
-                        body["content"],
-                        add_special_tokens=body["add_special"],
-                    )
-                },
-            )
+            backend_tokenizer = self.tokenizer.backend_tokenizer
+            previous_parse_special = backend_tokenizer.encode_special_tokens
+            try:
+                backend_tokenizer.encode_special_tokens = body["parse_special"]
+                tokens = self.tokenizer.encode(
+                    body["content"],
+                    add_special_tokens=body["add_special"],
+                )
+            finally:
+                backend_tokenizer.encode_special_tokens = previous_parse_special
+            return httpx.Response(200, json={"tokens": tokens})
         if request.url.path == "/detokenize":
             body = json.loads(request.content)
             return httpx.Response(

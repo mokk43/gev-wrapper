@@ -67,7 +67,7 @@ Reuse upstream prompt and assembly logic where practical and pin any private int
 
 ## Probability extraction and coverage
 
-Preserve the existing raw-token `/completion` approach: one prediction, `temperature=-1`, pre-sampling probabilities, neutral penalties, disabled sampling filters, and non-streaming responses. Start with prompt caching disabled, matching the supplied engine; changing caching later requires equivalence checks.
+Preserve the existing raw-token `/completion` approach: one prediction, `temperature=-1`, pre-sampling probabilities, neutral penalties, disabled sampling filters, and non-streaming responses. Set `min_keep` equal to the requested `n_probs` coverage so the selected llama.cpp sampler must retain at least that many candidates; validate the returned coverage rather than assuming the request was honored. Start with prompt caching disabled, matching the supplied engine; changing caching later requires equivalence checks.
 
 The expected response contains `probs[0].top_logprobs`, with token IDs and log probabilities. Ignore generated text as a source of decision answers. Relative log probabilities can stand in for logits because the shared full-vocabulary normalization term cancels when softmax is applied over the requested options.
 
@@ -79,7 +79,7 @@ The actual retry schedule, maximum coverage, and vocabulary discovery method mus
 
 Report actual llama.cpp input and output token work across all rows and coverage retries attributable to the successful request. Repeated state processing counts repeatedly. Map verified backend counters into `usage.input_tokens` and `usage.output_tokens`; do not assume a field named `tokens_evaluated` has the intended accounting semantics without checking the pinned server version and caching behavior.
 
-Use one documented interpretation of backend counters and ensure accounting remains isolated across concurrent requests. A malformed or missing usage counter is a backend-contract error, not a reason to invent zero usage. Preparation-only results require no backend token work; normal remote inference requests generate one scoring token per evaluation attempt.
+Use one documented interpretation of backend counters and ensure accounting remains isolated across concurrent requests. A malformed or missing usage counter is a backend-contract error, not a reason to invent zero usage. Because every request disables prompt caching, reject nonzero `tokens_cached` during startup and runtime. Preparation-only results require no backend token work; normal remote inference requests generate one scoring token per evaluation attempt.
 
 This intentionally differs from inherited Decider accounting, which reports logical shared input tokens and zero output tokens. See [ADR 0001](adr/0001-report-model-identity-and-backend-work.md).
 

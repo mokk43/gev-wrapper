@@ -9,6 +9,7 @@ import httpx
 from decider_service.config import INVALID_PROBE_CREDENTIAL, Settings
 from decider_service.decision import (
     BackendContractError,
+    BackendCounterSemanticsError,
     BackendProbabilityCoverageError,
     BackendProbabilityDataError,
     BackendTokenIdentityError,
@@ -354,7 +355,6 @@ async def validate_backend_deployment(
                 fixture.row,
                 settings.maximum_probability_coverage,
             )
-            probe_payload["min_keep"] = settings.maximum_probability_coverage
             completion_response = await _request(
                 client,
                 "POST",
@@ -386,6 +386,11 @@ async def validate_backend_deployment(
                 raise StartupValidationError(
                     "backend /completion returned incompatible token IDs"
                 ) from exc
+            except BackendCounterSemanticsError as exc:
+                raise StartupValidationError(
+                    "backend counters do not represent uncached prompt and "
+                    "generated work"
+                ) from exc
             except BackendContractError as exc:
                 raise StartupValidationError(
                     "backend /completion probability or counter contract is "
@@ -394,7 +399,6 @@ async def validate_backend_deployment(
             if (
                 parsed.input_tokens != len(fixture.row.token_ids)
                 or parsed.output_tokens != 1
-                or completion_body.get("tokens_cached") != 0
             ):
                 raise StartupValidationError(
                     "backend counters do not represent uncached prompt and "

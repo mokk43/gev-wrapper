@@ -120,6 +120,7 @@ def completion_response(
     *,
     input_tokens: int = 11,
     output_tokens: int = 1,
+    cached_tokens: int = 0,
 ) -> httpx.Response:
     return httpx.Response(
         200,
@@ -133,6 +134,7 @@ def completion_response(
                     ]
                 }
             ],
+            "tokens_cached": cached_tokens,
             "tokens_evaluated": input_tokens,
             "tokens_predicted": output_tokens,
             "truncated": False,
@@ -201,6 +203,7 @@ async def test_choice_is_evaluated_through_the_public_http_boundary(
         "n_predict": 1,
         "temperature": -1.0,
         "n_probs": 256,
+        "min_keep": 256,
         "post_sampling_probs": False,
         "repeat_penalty": 1.0,
         "presence_penalty": 0.0,
@@ -1233,6 +1236,20 @@ async def test_request_body_limit_returns_a_field_oriented_error(
                 }
             ],
             "tokens_evaluated": 10,
+        },
+        {
+            "probs": [
+                {
+                    "top_logprobs": [
+                        {"id": 1, "logprob": -0.1},
+                        {"id": 2, "logprob": -0.2},
+                    ]
+                }
+            ],
+            "tokens_cached": 1,
+            "tokens_evaluated": 10,
+            "tokens_predicted": 1,
+            "truncated": False,
         },
     ],
 )

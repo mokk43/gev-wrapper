@@ -5,7 +5,6 @@ import json
 import math
 import string
 import threading
-from datetime import date
 from pathlib import Path
 from typing import Any, cast
 
@@ -20,6 +19,13 @@ import decider_service.decision as decision_module
 from decider_service.app import create_app
 from decider_service.config import Settings
 from decider_service.decision import DecisionRuntime
+from tests.readiness_support import (
+    configured_settings as base_configured_settings,
+)
+from tests.readiness_support import (
+    ready_backend_transport,
+    write_test_manifest,
+)
 
 
 @pytest.fixture
@@ -68,30 +74,16 @@ def metadata_directory(tmp_path: Path) -> Path:
             }
         )
     )
+    write_test_manifest(tmp_path)
     return tmp_path
 
 
-def configured_settings(metadata_directory: Path, **overrides: object) -> Settings:
-    values: dict[str, object] = {
-        "backend_url": "http://127.0.0.1:8080",
-        "backend_build": "llama.cpp-b1234",
-        "gguf_revision": "b79f09d9ba7837f1b744295ea267b55d08e958ec",
-        "gguf_quantization": "Q4_K_M",
-        "metadata_directory": metadata_directory,
-        "metadata_revision": "b79f09d9ba7837f1b744295ea267b55d08e958ec",
-        "model_name": "decider-4b-q4-k-m",
-        "model_description": "Decider 4B served by the configured backend.",
-        "model_release_date": date(2025, 7, 4),
-        "model_aliases": ("jev-latest",),
-        "context_capacity": 32_768,
-        "backend_slots": 2,
-        "admission_capacity": 8,
-        "max_request_bytes": 1_048_576,
-        "max_questions": 32,
-        "max_options": 255,
-    }
-    values.update(overrides)
-    return Settings.model_validate(values)
+def configured_settings(
+    metadata_directory: Path,
+    **overrides: object,
+) -> Settings:
+    write_test_manifest(metadata_directory)
+    return base_configured_settings(metadata_directory, **overrides)
 
 
 def service_client(app: FastAPI) -> httpx.AsyncClient:
@@ -160,7 +152,7 @@ async def test_choice_is_evaluated_through_the_public_http_boundary(
 
     app = create_app(
         configured_settings(metadata_directory),
-        backend_transport=httpx.MockTransport(backend),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
     )
 
     async with (
@@ -237,7 +229,7 @@ async def test_noul_is_evaluated_through_the_public_http_boundary(
 
     app = create_app(
         configured_settings(metadata_directory),
-        backend_transport=httpx.MockTransport(backend),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
     )
 
     async with (
@@ -294,7 +286,7 @@ async def test_score_is_evaluated_as_an_expected_level_through_public_http(
 
     app = create_app(
         configured_settings(metadata_directory),
-        backend_transport=httpx.MockTransport(backend),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
     )
 
     async with (
@@ -357,7 +349,7 @@ async def test_one_level_score_is_prepared_without_backend_work(
 
     app = create_app(
         configured_settings(metadata_directory),
-        backend_transport=httpx.MockTransport(backend),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
     )
 
     async with (
@@ -405,7 +397,7 @@ async def test_score_accepts_empty_text_instructions(
 
     app = create_app(
         configured_settings(metadata_directory),
-        backend_transport=httpx.MockTransport(backend),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
     )
 
     async with (
@@ -464,7 +456,7 @@ async def test_mixed_choice_and_nonisolated_score_use_per_type_calibration_once(
 
     app = create_app(
         configured_settings(metadata_directory),
-        backend_transport=httpx.MockTransport(backend),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
     )
 
     async with (
@@ -540,7 +532,7 @@ async def test_multiple_choices_apply_temperature_once_and_sum_row_usage(
 
     app = create_app(
         configured_settings(metadata_directory),
-        backend_transport=httpx.MockTransport(backend),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
     )
     questions = {
         "priority": {
@@ -618,7 +610,7 @@ async def test_mixed_questions_apply_type_calibration_once_and_sum_usage(
 
     app = create_app(
         configured_settings(metadata_directory),
-        backend_transport=httpx.MockTransport(backend),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
     )
 
     async with (
@@ -796,7 +788,7 @@ async def test_unknown_model_and_configured_limits_fail_before_backend_work(
             max_questions=1,
             max_options=2,
         ),
-        backend_transport=httpx.MockTransport(backend),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
     )
     base: dict[str, Any] = {
         "state": "evidence",
@@ -924,7 +916,7 @@ async def test_score_level_count_above_the_pinned_limit_is_rejected(
 
     app = create_app(
         configured_settings(metadata_directory),
-        backend_transport=httpx.MockTransport(backend),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
     )
 
     async with service_client(app) as client:
@@ -964,7 +956,7 @@ async def test_later_isolated_score_prompt_overflow_names_its_question(
 
     app = create_app(
         configured_settings(metadata_directory, context_capacity=64),
-        backend_transport=httpx.MockTransport(backend),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
     )
 
     async with (
@@ -1012,7 +1004,7 @@ async def test_noul_accepts_optional_fields_and_preserves_structured_values(
 
     app = create_app(
         configured_settings(metadata_directory),
-        backend_transport=httpx.MockTransport(backend),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
     )
     questions = [
         {"type": "noul", "instructions": "Is this true?"},
@@ -1079,7 +1071,7 @@ async def test_structured_fields_and_omitted_or_null_instructions_are_accepted(
 
     app = create_app(
         configured_settings(metadata_directory),
-        backend_transport=httpx.MockTransport(backend),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
     )
     requests: list[dict[str, Any]] = [
         {
@@ -1145,8 +1137,8 @@ async def test_complete_prompt_over_context_capacity_is_rejected_without_truncat
         return completion_response({1: 0.5, 2: 0.5})
 
     app = create_app(
-        configured_settings(metadata_directory, context_capacity=4),
-        backend_transport=httpx.MockTransport(backend),
+        configured_settings(metadata_directory, context_capacity=64),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
     )
 
     async with (
@@ -1257,7 +1249,7 @@ async def test_malformed_backend_data_returns_a_sanitized_502(
 
     app = create_app(
         configured_settings(metadata_directory),
-        backend_transport=httpx.MockTransport(backend),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
     )
 
     async with (
@@ -1305,7 +1297,7 @@ async def test_concurrent_noul_callers_keep_results_usage_and_credentials_isolat
 
     app = create_app(
         configured_settings(metadata_directory),
-        backend_transport=httpx.MockTransport(backend),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
     )
     payload = {
         "model": "decider-4b-q4-k-m",
@@ -1394,7 +1386,7 @@ async def test_concurrent_score_callers_keep_rows_results_and_usage_isolated(
 
     app = create_app(
         configured_settings(metadata_directory, backend_slots=4),
-        backend_transport=httpx.MockTransport(backend),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
     )
     payload = {
         "model": "decider-4b-q4-k-m",
@@ -1509,7 +1501,7 @@ async def test_question_is_unchanged_when_independent_questions_are_reordered(
 
     app = create_app(
         configured_settings(metadata_directory),
-        backend_transport=httpx.MockTransport(backend),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
     )
     async with (
         app.router.lifespan_context(app),
@@ -1572,7 +1564,7 @@ async def test_score_is_unchanged_when_a_choice_is_added_or_reordered(
 
     app = create_app(
         configured_settings(metadata_directory),
-        backend_transport=httpx.MockTransport(backend),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
     )
     score = {
         "type": "score",
@@ -1637,7 +1629,7 @@ async def test_neutralized_option_maps_back_to_the_requested_label(
 
     app = create_app(
         configured_settings(metadata_directory),
-        backend_transport=httpx.MockTransport(backend),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
     )
 
     async with (
@@ -1745,7 +1737,7 @@ async def test_backend_credential_rejection_is_a_public_authentication_error(
 
     app = create_app(
         configured_settings(metadata_directory),
-        backend_transport=httpx.MockTransport(backend),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
     )
 
     async with (
@@ -1788,7 +1780,7 @@ async def test_backend_slots_bound_rows_within_one_request(
             backend_slots=1,
             admission_capacity=2,
         ),
-        backend_transport=httpx.MockTransport(backend),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
     )
     payload = multi_row_choice_request_payload()
 
@@ -1842,7 +1834,7 @@ async def test_backend_slots_are_global_across_multi_row_callers(
             backend_slots=2,
             admission_capacity=4,
         ),
-        backend_transport=httpx.MockTransport(backend),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
     )
     payload = multi_row_choice_request_payload()
 
@@ -1891,7 +1883,7 @@ async def test_exhausted_admission_rejects_without_backend_work(
             backend_slots=1,
             admission_capacity=1,
         ),
-        backend_transport=httpx.MockTransport(backend),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
     )
 
     async with (
@@ -1957,7 +1949,7 @@ async def test_request_deadline_cancels_backend_work_and_releases_capacity(
             admission_capacity=1,
             request_deadline_seconds=0.05,
         ),
-        backend_transport=httpx.MockTransport(backend),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
     )
     payload = multi_row_choice_request_payload()
 
@@ -2001,7 +1993,7 @@ async def test_early_backend_transport_timeout_returns_503(
 
     app = create_app(
         configured_settings(metadata_directory),
-        backend_transport=httpx.MockTransport(backend),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
     )
 
     async with (
@@ -2074,8 +2066,8 @@ async def test_abandoned_preparation_does_not_overlap_shared_runtime(
 
     app = create_app(
         settings,
-        backend_transport=httpx.MockTransport(
-            lambda _request: completion_response({1: 0.7, 2: 0.3})
+        backend_transport=ready_backend_transport(
+            metadata_directory, lambda _request: completion_response({1: 0.7, 2: 0.3})
         ),
     )
 
@@ -2165,7 +2157,7 @@ async def test_abandoned_preparation_remains_bounded_after_deadline(
 
     app = create_app(
         settings,
-        backend_transport=httpx.MockTransport(backend),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
     )
     blocked_payload = choice_request_payload()
     blocked_payload["state"] = "blocked preparation"
@@ -2254,7 +2246,7 @@ async def test_assembly_deadline_releases_request_capacity_but_bounds_offload(
 
     app = create_app(
         settings,
-        backend_transport=httpx.MockTransport(backend),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
     )
 
     try:
@@ -2324,7 +2316,7 @@ async def test_shutdown_cancels_inflight_backend_work(
 
     app = create_app(
         configured_settings(metadata_directory),
-        backend_transport=httpx.MockTransport(backend),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
     )
     lifespan = app.router.lifespan_context(app)
     await lifespan.__aenter__()
@@ -2380,8 +2372,8 @@ async def test_shutdown_awaits_abandoned_offloaded_work(
 
     app = create_app(
         settings,
-        backend_transport=httpx.MockTransport(
-            lambda _request: completion_response({1: 0.7, 2: 0.3})
+        backend_transport=ready_backend_transport(
+            metadata_directory, lambda _request: completion_response({1: 0.7, 2: 0.3})
         ),
     )
     lifespan = app.router.lifespan_context(app)
@@ -2452,7 +2444,7 @@ async def test_caller_disconnect_stops_pending_rows_and_releases_capacity(
             backend_slots=1,
             admission_capacity=1,
         ),
-        backend_transport=httpx.MockTransport(backend),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
     )
     payload = multi_row_choice_request_payload()
     body = json.dumps(payload).encode()
@@ -2521,7 +2513,7 @@ async def test_empty_preparation_for_evaluable_question_returns_a_sanitized_502(
 
     app = create_app(
         settings,
-        backend_transport=httpx.MockTransport(backend),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
     )
 
     async with (
@@ -2567,7 +2559,7 @@ async def test_invalid_preparation_shape_returns_a_sanitized_502(
 
     app = create_app(
         settings,
-        backend_transport=httpx.MockTransport(backend),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
     )
 
     async with (
@@ -2607,7 +2599,7 @@ async def test_calibration_and_assembly_run_off_the_event_loop(
 
     app = create_app(
         configured_settings(metadata_directory),
-        backend_transport=httpx.MockTransport(backend),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
     )
 
     async with (

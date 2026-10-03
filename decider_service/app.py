@@ -28,6 +28,7 @@ from decider_service.decision import (
     PublicInputError,
     evaluate_request,
 )
+from decider_service.readiness import validate_backend_deployment
 
 
 class ModelMetadata(BaseModel):
@@ -200,14 +201,22 @@ def create_app(
             transport=backend_transport,
         ) as backend_client:
             app.state.backend_client = backend_client
-            app.state.decision_runtime = None
-            app.state.decision_runtime_lock = asyncio.Lock()
             app.state.decision_capacity = DecisionCapacity(
                 backend_slots=settings.backend_slots,
                 admission_capacity=settings.admission_capacity,
             )
             app.state.active_requests = ActiveRequests()
             try:
+                app.state.decision_runtime = (
+                    await app.state.decision_capacity.run_offloaded(
+                        lambda: DecisionRuntime(settings)
+                    )
+                )
+                app.state.backend_capabilities = await validate_backend_deployment(
+                    settings,
+                    app.state.decision_runtime,
+                    backend_client,
+                )
                 yield
             finally:
                 await app.state.active_requests.close()
@@ -300,14 +309,6 @@ def create_app(
         async def evaluate_admitted_request() -> DecisionResult:
             async with app.state.decision_capacity.admit():
                 runtime = app.state.decision_runtime
-                if runtime is None:
-                    async with app.state.decision_runtime_lock:
-                        runtime = app.state.decision_runtime
-                        if runtime is None:
-                            runtime = await app.state.decision_capacity.run_offloaded(
-                                lambda: DecisionRuntime(settings)
-                            )
-                            app.state.decision_runtime = runtime
                 return await evaluate_request(
                     request,
                     runtime=runtime,

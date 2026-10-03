@@ -32,6 +32,7 @@ IMMUTABLE_REVISION = re.compile(
     r"(?:[0-9a-f]{40}|(?:sha256:)?[0-9a-f]{64})",
     re.IGNORECASE,
 )
+INVALID_PROBE_CREDENTIAL = "decider-readiness-invalid-credential"
 
 
 class Settings(BaseSettings):
@@ -43,6 +44,8 @@ class Settings(BaseSettings):
 
     backend_url: AnyHttpUrl
     backend_build: NonemptyString
+    backend_model_id: NonemptyString
+    backend_model_path: NonemptyString
     gguf_revision: NonemptyString
     gguf_quantization: NonemptyString
     metadata_directory: DirectoryPath
@@ -60,11 +63,15 @@ class Settings(BaseSettings):
     max_questions: PositiveInt
     max_options: int = Field(ge=2, le=255)
 
-    operator_probe_api_key: SecretStr | None = None
+    operator_probe_api_key: SecretStr
     bind_host: IPvAnyAddress = IPv4Address("127.0.0.1")
     bind_port: int = Field(default=8000, ge=1, le=65_535)
     request_deadline_seconds: PositiveFloat = 60.0
     initial_probability_coverage: PositiveInt = 256
+    maximum_probability_coverage: PositiveInt
+    startup_probe_attempts: PositiveInt = 3
+    startup_probe_timeout_seconds: PositiveFloat = 30.0
+    startup_tokenizer_probe_chunk_size: int = Field(default=4096, ge=1, le=8192)
 
     @field_validator("model_aliases", mode="before")
     @classmethod
@@ -102,13 +109,23 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def configuration_is_consistent(self) -> Settings:
+        if not self.operator_probe_api_key.get_secret_value().strip():
+            raise ValueError("operator_probe_api_key must not be empty")
         if len(set(self.model_aliases)) != len(self.model_aliases):
             raise ValueError("model_aliases must be unique")
         if self.model_name in self.model_aliases:
             raise ValueError("model_aliases must not repeat model_name")
         if self.admission_capacity < self.backend_slots:
             raise ValueError("admission_capacity must be at least backend_slots")
+        if self.initial_probability_coverage > self.maximum_probability_coverage:
+            raise ValueError(
+                "initial_probability_coverage must not exceed "
+                "maximum_probability_coverage"
+            )
+        if self.operator_probe_api_key.get_secret_value() == INVALID_PROBE_CREDENTIAL:
+            raise ValueError("operator_probe_api_key uses the reserved rejection probe")
         return self
+
 
 def load_settings() -> Settings:
     # Required values come from BaseSettings' environment sources at runtime.

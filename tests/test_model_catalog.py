@@ -8,6 +8,16 @@ from pydantic import ValidationError
 
 from decider_service.app import create_app
 from decider_service.config import Settings
+from tests.readiness_support import (
+    BACKEND_MODEL_ID,
+    BACKEND_MODEL_PATH,
+    PROBE_KEY,
+    ready_backend_transport,
+    write_test_metadata,
+)
+from tests.readiness_support import (
+    configured_settings as base_configured_settings,
+)
 
 
 @pytest.fixture
@@ -22,26 +32,14 @@ def service_client(app: FastAPI) -> httpx.AsyncClient:
     )
 
 
-def configured_settings(metadata_directory: Path, **overrides: object) -> Settings:
-    values: dict[str, object] = {
-        "backend_url": "http://127.0.0.1:8080",
-        "backend_build": "llama.cpp-b1234",
-        "gguf_revision": "b79f09d9ba7837f1b744295ea267b55d08e958ec",
-        "gguf_quantization": "Q4_K_M",
-        "metadata_directory": metadata_directory,
-        "metadata_revision": "b79f09d9ba7837f1b744295ea267b55d08e958ec",
-        "model_name": "decider-4b-q4-k-m",
-        "model_description": "Decider 4B served by the configured llama.cpp backend.",
-        "model_release_date": date(2025, 7, 4),
-        "context_capacity": 32_768,
-        "backend_slots": 2,
-        "admission_capacity": 8,
-        "max_request_bytes": 1_048_576,
-        "max_questions": 32,
-        "max_options": 255,
-    }
-    values.update(overrides)
-    return Settings.model_validate(values)
+def configured_settings(
+    metadata_directory: Path,
+    **overrides: object,
+) -> Settings:
+    if metadata_directory.is_dir():
+        write_test_metadata(metadata_directory)
+    overrides.setdefault("model_aliases", ())
+    return base_configured_settings(metadata_directory, **overrides)
 
 
 @pytest.mark.anyio
@@ -89,16 +87,14 @@ async def test_catalog_lists_only_explicit_compatibility_aliases(
         {
             "name": "legacy-decider",
             "description": (
-                "Compatibility alias routing to Decider model "
-                "'decider-4b-q4-k-m'."
+                "Compatibility alias routing to Decider model 'decider-4b-q4-k-m'."
             ),
             "release_date": "2025-07-04",
         },
         {
             "name": "jev-latest",
             "description": (
-                "Compatibility alias routing to Decider model "
-                "'decider-4b-q4-k-m'."
+                "Compatibility alias routing to Decider model 'decider-4b-q4-k-m'."
             ),
             "release_date": "2025-07-04",
         },
@@ -204,6 +200,8 @@ async def test_environment_factory_serves_configured_aliases(
     environment = {
         "DECIDER_BACKEND_URL": "http://127.0.0.1:8080",
         "DECIDER_BACKEND_BUILD": "llama.cpp-b1234",
+        "DECIDER_BACKEND_MODEL_ID": BACKEND_MODEL_ID,
+        "DECIDER_BACKEND_MODEL_PATH": BACKEND_MODEL_PATH,
         "DECIDER_GGUF_REVISION": "b79f09d9ba7837f1b744295ea267b55d08e958ec",
         "DECIDER_GGUF_QUANTIZATION": "Q4_K_M",
         "DECIDER_METADATA_DIRECTORY": str(tmp_path),
@@ -218,6 +216,8 @@ async def test_environment_factory_serves_configured_aliases(
         "DECIDER_MAX_REQUEST_BYTES": "1048576",
         "DECIDER_MAX_QUESTIONS": "32",
         "DECIDER_MAX_OPTIONS": "255",
+        "DECIDER_MAXIMUM_PROBABILITY_COVERAGE": "512",
+        "DECIDER_OPERATOR_PROBE_API_KEY": PROBE_KEY,
     }
     for name, value in environment.items():
         monkeypatch.setenv(name, value)
@@ -262,7 +262,7 @@ async def test_application_lifecycle_owns_the_injected_backend_boundary(
 
     app = create_app(
         configured_settings(tmp_path),
-        backend_transport=httpx.MockTransport(respond),
+        backend_transport=ready_backend_transport(tmp_path, respond),
     )
 
     async with app.router.lifespan_context(app):

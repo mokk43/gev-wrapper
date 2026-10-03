@@ -4,7 +4,7 @@ import asyncio
 import json
 import math
 import sys
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,6 +37,7 @@ from decider_service.contracts import (
     StructuredValue,
     SystemOneRequest,
 )
+from decider_service.deployment import validate_local_deployment
 
 
 class PublicInputError(Exception):
@@ -53,6 +54,18 @@ class PublicInputError(Exception):
 
 
 class BackendContractError(Exception):
+    pass
+
+
+class BackendProbabilityCoverageError(BackendContractError):
+    pass
+
+
+class BackendProbabilityDataError(BackendContractError):
+    pass
+
+
+class BackendTokenIdentityError(BackendContractError):
     pass
 
 
@@ -156,6 +169,13 @@ class DecisionResult:
     output_tokens: int
 
 
+@dataclass(frozen=True)
+class ReadinessFixture:
+    vocabulary_size: int
+    label_token_ids: tuple[int, ...]
+    row: PreparedRow
+
+
 def _question_name_for_row(
     answer_index: list[tuple[str, str, int, int]],
     row_number: int,
@@ -171,15 +191,7 @@ def _question_name_for_row(
 class DecisionRuntime:
     def __init__(self, settings: Settings) -> None:
         metadata_directory = Path(settings.metadata_directory)
-        config_path = metadata_directory / "decider_config.json"
-        try:
-            config = json.loads(config_path.read_text())
-        except (OSError, json.JSONDecodeError) as exc:
-            raise RuntimeError(
-                f"Cannot load required Decider metadata: {config_path}"
-            ) from exc
-        if not isinstance(config, dict):
-            raise RuntimeError("decider_config.json must contain a JSON object")
+        config = validate_local_deployment(settings)
 
         tokenizer = AutoTokenizer.from_pretrained(
             metadata_directory,
@@ -202,7 +214,66 @@ class DecisionRuntime:
         self._decider = decider
         self._context_capacity = settings.context_capacity
         self._label_token_ids = tuple(int(token) for token in letter_ids(tokenizer))
+        self._tokenizer = tokenizer
+        self._model_name = settings.model_name
         self._preparation_lock = Lock()
+
+    def readiness_fixture(self) -> ReadinessFixture:
+        request = SystemOneRequest.model_validate(
+            {
+                "model": self._model_name,
+                "state": "synthetic startup readiness evidence",
+                "questions": {
+                    "readiness": {
+                        "type": "choice",
+                        "criteria": {
+                            "compatible": None,
+                            "incompatible": None,
+                        },
+                    }
+                },
+            }
+        )
+        prepared = self.prepare(request)
+        if len(prepared.rows) != 1:
+            raise BackendContractError(
+                "Pinned Decider preparation did not produce one readiness row"
+            )
+        return ReadinessFixture(
+            vocabulary_size=len(self._tokenizer),
+            label_token_ids=self._label_token_ids,
+            row=prepared.rows[0],
+        )
+
+    def tokenizer_identity_chunks(
+        self,
+        chunk_size: int,
+    ) -> Iterator[tuple[tuple[int, ...], str, tuple[int, ...]]]:
+        for first_token_id in range(0, len(self._tokenizer), chunk_size):
+            token_ids = tuple(
+                range(
+                    first_token_id,
+                    min(first_token_id + chunk_size, len(self._tokenizer)),
+                )
+            )
+            content = cast(
+                str,
+                self._tokenizer.decode(
+                    list(token_ids),
+                    skip_special_tokens=False,
+                    clean_up_tokenization_spaces=False,
+                ),
+            )
+            encoded_token_ids = tuple(
+                cast(
+                    list[int],
+                    self._tokenizer.encode(
+                        content,
+                        add_special_tokens=False,
+                    ),
+                )
+            )
+            yield token_ids, content, encoded_token_ids
 
     def prepare(self, request: SystemOneRequest) -> PreparedDecision:
         with self._preparation_lock:
@@ -322,9 +393,12 @@ def _required_nonnegative_integer(body: dict[str, Any], field: str) -> int:
     return value
 
 
-def _parse_backend_row(
+def parse_backend_row(
     body: object,
     required_token_ids: tuple[int, ...],
+    *,
+    expected_probability_coverage: int | None = None,
+    vocabulary_size: int | None = None,
 ) -> BackendRow:
     if not isinstance(body, dict):
         raise BackendContractError("backend returned malformed completion data")
@@ -332,27 +406,41 @@ def _parse_backend_row(
     try:
         top_logprobs = typed_body["probs"][0]["top_logprobs"]
     except (KeyError, IndexError, TypeError) as exc:
-        raise BackendContractError(
+        raise BackendProbabilityDataError(
             "backend returned malformed probability data"
         ) from exc
     if not isinstance(top_logprobs, list):
-        raise BackendContractError("backend returned malformed probability data")
+        raise BackendProbabilityDataError("backend returned malformed probability data")
+    if (
+        expected_probability_coverage is not None
+        and len(top_logprobs) != expected_probability_coverage
+    ):
+        raise BackendProbabilityCoverageError(
+            "backend returned incompatible probability coverage"
+        )
 
     by_token_id: dict[int, float] = {}
     for entry in top_logprobs:
         if not isinstance(entry, dict):
-            raise BackendContractError("backend returned malformed probability data")
+            raise BackendProbabilityDataError(
+                "backend returned malformed probability data"
+            )
         token_id = entry.get("id")
         log_probability = entry.get("logprob")
+        if isinstance(token_id, bool) or not isinstance(token_id, int):
+            raise BackendTokenIdentityError("backend returned incompatible token IDs")
         if (
-            isinstance(token_id, bool)
-            or not isinstance(token_id, int)
-            or isinstance(log_probability, bool)
+            vocabulary_size is not None and not 0 <= token_id < vocabulary_size
+        ) or token_id in by_token_id:
+            raise BackendTokenIdentityError("backend returned incompatible token IDs")
+        if (
+            isinstance(log_probability, bool)
             or not isinstance(log_probability, int | float)
             or not math.isfinite(log_probability)
-            or token_id in by_token_id
         ):
-            raise BackendContractError("backend returned malformed probability data")
+            raise BackendProbabilityDataError(
+                "backend returned malformed probability data"
+            )
         by_token_id[token_id] = float(log_probability)
 
     try:
@@ -380,22 +468,7 @@ async def _evaluate_row(
     probability_coverage: int,
     deadline: float,
 ) -> BackendRow:
-    payload = {
-        "prompt": list(row.token_ids),
-        "n_predict": 1,
-        "temperature": -1.0,
-        "n_probs": probability_coverage,
-        "post_sampling_probs": False,
-        "repeat_penalty": 1.0,
-        "presence_penalty": 0.0,
-        "frequency_penalty": 0.0,
-        "top_k": 0,
-        "top_p": 1.0,
-        "min_p": 0.0,
-        "typical_p": 1.0,
-        "cache_prompt": False,
-        "stream": False,
-    }
+    payload = completion_payload(row, probability_coverage)
     try:
         async with capacity.backend_slot():
             remaining = deadline - asyncio.get_running_loop().time()
@@ -422,7 +495,29 @@ async def _evaluate_row(
         body = response.json()
     except ValueError as exc:
         raise BackendContractError("backend returned malformed JSON") from exc
-    return _parse_backend_row(body, label_token_ids[: row.option_count])
+    return parse_backend_row(body, label_token_ids[: row.option_count])
+
+
+def completion_payload(
+    row: PreparedRow,
+    probability_coverage: int,
+) -> dict[str, Any]:
+    return {
+        "prompt": list(row.token_ids),
+        "n_predict": 1,
+        "temperature": -1.0,
+        "n_probs": probability_coverage,
+        "post_sampling_probs": False,
+        "repeat_penalty": 1.0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
+        "top_k": 0,
+        "top_p": 1.0,
+        "min_p": 0.0,
+        "typical_p": 1.0,
+        "cache_prompt": False,
+        "stream": False,
+    }
 
 
 def _calibrate_and_assemble(

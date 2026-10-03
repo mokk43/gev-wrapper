@@ -14,9 +14,11 @@ configured capacities. One whole-request deadline covers admitted preparation,
 backend-slot waiting, evaluation, and assembly; expiry, caller disconnect, and
 shutdown cancel pending request tasks and release service capacity. Offloaded
 preparation and assembly remain separately bounded until their worker threads
-finish. Coverage recovery, readiness checks, and the final catalog authentication
-boundary remain separate implementation slices. The service remains restricted
-to loopback and is not production-ready.
+finish. Startup blocks traffic until pinned local metadata and the selected
+llama.cpp deployment pass bounded artifact, build, tokenizer, context,
+probability, counter, and authentication checks. Coverage recovery and the final
+catalog authentication boundary remain separate implementation slices. The
+service remains restricted to loopback and is not production-ready.
 
 ## Catalog setup
 
@@ -26,12 +28,18 @@ Install the locked catalog environment:
 uv sync --python 3.12.5 --locked
 ```
 
-Set every required variable in [the configuration reference](docs/configuration.md), then validate and run:
+Create the pinned `deployment-manifest.json` described in the
+[configuration reference](docs/configuration.md), set every required variable,
+then validate and run:
 
 ```shell
 uv run decider-service --validate-config
 uv run decider-service
 ```
+
+`--validate-config` checks environment parsing only. Starting the application
+runs the bounded backend compatibility gate and fails startup with a sanitized,
+actionable diagnostic when the deployment is unavailable or incompatible.
 
 Check the public wire response from another shell. Supply an API key explicitly
 when checking a future authenticated slice:
@@ -73,9 +81,10 @@ curl http://127.0.0.1:8000/v1/systemone \
 ```
 
 The response maps native `tokens_evaluated` and `tokens_predicted` counters to
-`usage.input_tokens` and `usage.output_tokens`. Their real accounting semantics
-remain unverified until the selected llama.cpp build is checked; mock-backed
-tests establish request-local summing only.
+`usage.input_tokens` and `usage.output_tokens`. Startup verifies their uncached
+one-row semantics against the selected build; mock-backed tests establish
+request-local summing. Retry-inclusive accounting remains part of the coverage
+recovery slice.
 
 ## Project documents
 
@@ -97,7 +106,17 @@ GGUF weights belong to the external llama.cpp deployment. The planned service ne
 
 ## Development and authentication inputs
 
-The user supplied a local decider-4b test backend; its address and test credential are recorded in the [service configuration requirements](docs/service-design.md#configuration-and-deployment-inputs). Availability and capabilities have not been verified. Decision requests require TypeSafe-format bearer credentials, forwarded to the configured backend per request and never installed on the shared client. Backend 401 and 403 responses become sanitized public authentication failures with the same status. Verification against the selected backend and pinned TypeSafe client, plus authentication for the public model catalog, remains part of the operational-boundary slice. Startup probe credentials remain separate and cannot serve as runtime authentication fallback.
+The user supplied a local decider-4b test backend; its address and test
+credential are recorded in the [service configuration requirements](docs/service-design.md#configuration-and-deployment-inputs).
+No live result is recorded in this repository. Each service start verifies the
+configured deployment before accepting traffic. Decision requests require
+TypeSafe-format bearer credentials, forwarded to the configured backend per
+request and never installed on the shared client. Backend 401 and 403 responses
+become sanitized public authentication failures with the same status.
+Verification against the pinned TypeSafe client, plus authentication for the
+public model catalog, remains part of the operational-boundary slice. Startup
+probe credentials remain separate and cannot serve as runtime authentication
+fallback.
 
 ## References
 

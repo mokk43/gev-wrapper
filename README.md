@@ -4,12 +4,12 @@ A planned async FastAPI service that accepts TypeSafe's `/v1/systemone` requests
 
 ## Status
 
-The design was accepted on 2026-10-02. Implementation is deferred. The two supplied Python files are reference adapters, not a running web service; there is no supported installation or launch command yet.
+The design was accepted on 2026-10-02. Nine implementation tickets were approved and published to the [local tracker](.scratch/decider-service/issues/) on 2026-10-03. Implementation is deferred. The two supplied Python files are reference adapters, not a running web service; there is no supported installation or launch command yet.
 
 ## Project documents
 
 - [Service design](docs/service-design.md): accepted requirements, inference flow, deployment inputs, and implementation acceptance checks.
-- [Implementation plan](docs/implementation-plan.md): ordered work packages, user stories, testing seam, and completion criteria; tracker publication is pending.
+- [Implementation plan](docs/implementation-plan.md): ordered work packages, user stories, testing seam, and completion criteria.
 - [Domain glossary](CONTEXT.md): the meaning of State, Choice, Noul, Score, Decider, and Jev.
 - [Response identity and accounting decision](docs/adr/0001-report-model-identity-and-backend-work.md): why compatible responses expose the actual model and backend work.
 - [Agent instructions](AGENTS.md): project scope, document ownership, and working conventions.
@@ -20,6 +20,10 @@ The design was accepted on 2026-10-02. Implementation is deferred. The two suppl
 - [remote_llamacpp_engine.py](remote_llamacpp_engine.py) evaluates final answer slots through llama.cpp's native `/completion` endpoint. Its synchronous transport must be adapted for the accepted async design.
 
 GGUF weights belong to the external llama.cpp deployment. The planned service needs matching tokenizer and Decider configuration metadata locally; it does not load model weights.
+
+## Development and authentication inputs
+
+The user supplied a local decider-4b test backend; its address and test credential are recorded in the [service configuration requirements](docs/service-design.md#configuration-and-deployment-inputs). Availability and capabilities have not been verified. Real users will supply TypeSafe-format bearer credentials that the service forwards to the configured backend, isolated per request. Startup probe credentials remain separate and cannot serve as runtime authentication fallback.
 
 ## References
 

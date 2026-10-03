@@ -1,6 +1,6 @@
 # TypeSafe-compatible Decider service implementation plan
 
-Status: synthesized from the accepted design on 2026-10-02; the user confirmed the testing seam on the same date. This document plans implementation; application code remains deferred. Tracker publication is pending project tracker and triage-label configuration.
+Status: synthesized from the accepted design on 2026-10-02; the user confirmed the testing seam on the same date. The nine-ticket breakdown was approved and published to the [local tracker](../.scratch/decider-service/issues/) on 2026-10-03 with `ready-for-agent` status. This document plans implementation; application code remains deferred.
 
 ## Problem Statement
 
@@ -50,7 +50,7 @@ Use bounded concurrency and a whole-request deadline, return all answers or a sa
 32. As a service operator, I want environment-based configuration, so that the same service can target the chosen deployment without embedding deployment values in code.
 33. As a service operator, I want GGUF weights kept on llama.cpp, so that the adapter does not load a duplicate model.
 34. As a service operator, I want loopback exposure by default and service authentication for network access, so that exposure is intentional.
-35. As a service operator, I want service and backend credentials kept separate, so that caller credentials are not forwarded upstream.
+35. As an application developer, I want my TypeSafe-format bearer key forwarded to the configured backend for my request, so that I can use backend-issued credentials without a second runtime credential. As a service operator, I want startup probe credentials kept separate from caller requests, so that probes cannot become an authentication fallback.
 36. As a service operator, I want sanitized errors and body-free logs, so that diagnostics do not disclose user evidence or secrets.
 37. As a service operator, I want connection resources closed during shutdown, so that service restarts do not leave client tasks or connections unmanaged.
 38. As a maintainer, I want tests based on observable HTTP behavior, so that implementation refactoring does not force tests to mirror internal structure.
@@ -65,7 +65,7 @@ The accepted service design owns technical requirements. The ordered work packag
 
 - Capture a versioned TypeSafe HTTP contract and pin a compatible Decider dependency and tokenizer/config revision. Treat SDK definitions as interoperability evidence rather than broader public validation rules.
 - Establish a reproducible Python environment and future service/test entry points. Reuse supplied adapter behavior as the baseline; do not load inference weights in the application.
-- Define the deployment configuration boundary for backend address/build, model identity/release date, aliases, matching metadata, context capacity, concurrency, admission, request limits, and separate credentials.
+- Define the deployment configuration boundary for backend address/build, model identity/release date, aliases, matching metadata, context capacity, concurrency, admission, request limits, and optional startup probe credentials. Use the documented local development fixture for explicit live tests; real-user runtime keys arrive in TypeSafe bearer headers.
 - Complete when the contract fixture, dependency compatibility, and required-versus-default configuration are explicit. Actual backend artifact identifiers can remain required operator inputs until deployment is selected.
 
 ### 2. Build public validation and model resolution
@@ -100,14 +100,14 @@ The accepted service design owns technical requirements. The ordered work packag
 
 ### 6. Finish the public operational boundary
 
-- Bind to loopback by default; require a configured service bearer token for network exposure. Keep backend credentials separate and prevent service-token forwarding.
+- Bind to loopback by default; require TypeSafe-format caller bearer credentials on real-user requests and forward them only to the configured backend. Keep authorization local to each request and retry, with no shared-client mutation or runtime fallback to development/startup probe keys. Verify authenticated behavior for both public endpoints against the chosen backend.
 - Return all answers or an error using the accepted validation/backend/unavailable/deadline status mapping. Sanitize public diagnostics and provide request identifiers without logging State, prompts, or credentials.
-- Keep authentication failures distinct from operator/backend credential failures. Verify unspecified authentication statuses and non-validation error bodies against the pinned clients instead of inventing hosted-platform fidelity.
-- Complete when exposure, credential separation, request isolation, errors, and log redaction pass public behavior checks.
+- Treat rejected forwarded caller keys as public authentication failures, while failed startup probe credentials are operator/readiness problems. Verify authentication statuses and non-validation error bodies against the pinned clients and backend instead of inventing hosted-platform fidelity.
+- Complete when exposure, caller-key forwarding and isolation, startup/runtime credential separation, errors, and log redaction pass public behavior checks.
 
 ### 7. Verify interoperability and document operation
 
-- Exercise an official TypeSafe client against the mock-backed service; run an opt-in live smoke check only after backend configuration is available.
+- Exercise an official TypeSafe client against the mock-backed service, including its API-key bearer header; run an opt-in live smoke check against the documented local development backend when available. Its supplied address/key do not prove tokenizer compatibility, counter semantics, or other capabilities.
 - Compare representative GGUF decisions with a trusted Decider baseline using a justified numerical tolerance. Measure workload behavior before selecting larger concurrency or asserting latency targets.
 - Replace planned setup notes with installation, launch, configuration, and verification commands that have actually been exercised.
 - Complete when the applicable acceptance suite and SDK checks pass, live capability results or explicit unavailable checks are recorded, and the user-facing documentation describes the implemented service accurately.
@@ -116,7 +116,7 @@ The accepted service design owns technical requirements. The ordered work packag
 
 - **Confirmed primary seam:** exercise the public FastAPI HTTP boundary and replace the external llama.cpp interaction with a controlled HTTP transport or mock server. Keep real validation, model resolution, prompt construction, calibration, assembly, error handling, and accounting in the test path.
 - **One controllable external boundary:** inject backend HTTP behavior through the application lifecycle rather than creating separate mocks for the preparation, scoring, and assembly modules. Model ordinary completion responses, missing option coverage, malformed payloads, latency, and metadata/counter variations at that boundary.
-- **Observable assertions:** test response fields, probability semantics, status codes, SDK results, resource bounds, and completion/cancellation behavior. Inspect upstream HTTP requests only for externally meaningful requirements such as credential separation, final-slot scoring, and coverage expansion; avoid asserting private methods or incidental call ordering.
+- **Observable assertions:** test response fields, probability semantics, status codes, SDK results, resource bounds, and completion/cancellation behavior. Inspect upstream HTTP requests only for externally meaningful requirements such as caller-key forwarding/isolation, startup/runtime credential separation, final-slot scoring, and coverage expansion; avoid asserting private methods or incidental call ordering.
 - **Modules under test:** public validation/model resolution, decision orchestration, async backend adaptation, admission/lifecycle management, and authentication/error handling are exercised together through HTTP requests. Use fixed backend distributions to isolate adapter semantics from model variability.
 - **Prior art:** the repository currently has no test suite or web-service test fixtures. The supplied adapters and accepted design provide inference expectations; they are not evidence of existing integration tests.
 - **Contract and semantics:** cover all accepted request variants, names/labels/legend fidelity, valid one-level Score, expected Score values, calibration, option-ID coverage, and independence under question composition changes. Select numerical tolerances after checking pinned assembler rounding.
@@ -136,7 +136,5 @@ The accepted service design owns technical requirements. The ordered work packag
 ## Further Notes
 
 - [The accepted service design](service-design.md) remains the technical source of truth; this plan orders its implementation. [The glossary](../CONTEXT.md) supplies domain terms, and [ADR 0001](adr/0001-report-model-identity-and-backend-work.md) explains response provenance/accounting.
-- Backend URL/build, GGUF revision and quantization, matching metadata directory, configured model identity/release date, capacity, and verified probability/usage capabilities are still unresolved deployment inputs. The plan does not guess these values.
-- Tracker and triage-label vocabulary are not configured in project documentation. The GitHub remote identifies a repository but does not establish the intended issue tracker. The invoked to-spec workflow requests `/setup-matt-pocock-skills` when this configuration is missing.
-- After tracker configuration, publish the spec to the configured tracker with the `ready-for-agent` label. Publishing a planning issue does not lift the user's current deferral of application implementation.
+- The user supplied local development backend access and amended authentication to caller-key forwarding on 2026-10-03; the accepted design records those inputs and requirements. Backend build, GGUF revision and quantization, matching metadata directory, configured model identity/release date, capacity, and verified probability/usage capabilities remain unresolved. Real deployment backend addresses are still operator inputs.
 - No application or live-backend tests have run for this document. Planning verification is limited to document consistency, links, and formatting.

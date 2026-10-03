@@ -1,6 +1,6 @@
 # Accepted service design
 
-Status: accepted on 2026-10-02; implementation deferred.
+Status: accepted on 2026-10-02; local development inputs and caller-key forwarding amended by the user on 2026-10-03. Implementation remains deferred.
 
 ## Purpose and boundary
 
@@ -13,6 +13,8 @@ The accepted scope includes `POST /v1/systemone`, `GET /v1/models`, request vali
 [TypeSafe's HTTP OpenAPI](https://api.typesafe.ai/openapi.json), inspected on 2026-10-02, is authoritative for public payload shapes. The [official SDK types](https://github.com/typesafe-ai/typesafe-sdk-js/blob/main/src/types.ts) are an interoperability reference. Some SDK types are broader than HTTP OpenAPI, including nullable state; the service follows HTTP OpenAPI rather than silently widening the contract.
 
 External schemas and package source can change. At implementation time, capture and pin the contract revision and compatible Decider dependency version. Resolve differences explicitly rather than assuming that the current branch still matches this design.
+
+TypeSafe's HTTP contract, rechecked on 2026-10-03, supplies the API key through `Authorization: Bearer <API_KEY>` for both public endpoints. Preserve this header-based authentication rather than adding a credential field to the decision JSON body. In real-user operation, the supplied key authenticates the configured llama.cpp backend through the service, according to the credential policy below.
 
 ### Requests
 
@@ -94,19 +96,27 @@ Return all answers or an error; do not send partial successful answer maps. Erro
 - 503: unavailable backend or exhausted admission capacity.
 - 504: whole-request deadline expired.
 
-Keep public backend errors sanitized; retain a request identifier and concise operational diagnostics. Preserve public authentication failures separately from backend failures. Backend credential rejection is an operator/backend availability problem, not evidence that the caller supplied invalid service credentials. Final non-validation error body details and authentication status handling must be checked against the pinned client behavior during implementation.
+Keep public backend errors sanitized; retain a request identifier and concise operational diagnostics. Missing or malformed caller bearer credentials and backend rejection of the forwarded caller key are public authentication failures, distinct from unavailable transport or backend-contract failures. Rejection of an operator-supplied startup probe credential is instead an operator/readiness problem. Final non-validation error body details and authentication statuses must be checked against the pinned client and chosen backend behavior during implementation; do not report caller-key rejection as backend unavailability.
 
 The coverage retries above are accepted. A broader transient-error retry policy is not established; avoid adding retries without accounting for the deadline and duplicate backend work.
 
 ## Configuration and deployment inputs
 
-Use environment-based configuration. Required deployment information remains unresolved: backend URL and build, decider-4b GGUF revision/quantization, matching metadata directory/revision, public model identity and release date, aliases, backend context capacity and parallel slots, and probability/usage capabilities.
+Use environment-based configuration. The user supplied the following local development fixture on 2026-10-03:
 
-Also configure backend concurrency, admission capacity, request limits, and optional backend credentials. Their numerical values and variable names are implementation/deployment choices, not settled measurements. Expected traffic, typical question counts, and a measured latency target have not been supplied; the 60-second deadline is a guardrail, not a performance claim.
+- Backend base URL: `http://127.0.0.1:8080`.
+- Native completion endpoint: `http://127.0.0.1:8080/completion`, serving decider-4b.
+- Local test API key: `llama5080`. Explicit local test clients send it as `Authorization: Bearer llama5080`; bounded startup probes may use it through operator configuration.
 
-Bind to loopback by default. Network exposure requires a configured service bearer token; pass backend credentials through a separate operator-controlled setting. Never forward the caller's service token to llama.cpp. Omit request bodies from logs, and redact credentials from diagnostics.
+These are user-provided test inputs, not observed server availability or verified capabilities. Keep the test key in explicit local configuration and test invocations, not a hardcoded production credential or runtime fallback. The remaining required deployment information is the backend build, GGUF revision/quantization, matching metadata directory/revision, public model identity and release date, aliases, backend context capacity and parallel slots, and probability/usage capabilities. A real deployment still needs its own configured backend address.
 
-At startup, validate the model metadata, configured alias mapping, backend readiness, tokenizer compatibility, probability response shape, usage counters, and context capacity. Missing or incompatible requirements must produce actionable diagnostics and prevent serving inference until resolved. Scope probes to metadata and a bounded synthetic fixture; real user evidence is unnecessary for startup checks.
+Also configure backend concurrency, admission capacity, request limits, and an operator startup probe credential when backend authentication requires one. Their numerical values and variable names are implementation/deployment choices, not settled measurements. Expected traffic, typical question counts, and a measured latency target have not been supplied; the 60-second deadline is a guardrail, not a performance claim.
+
+Bind to loopback by default. Real-user requests to both public endpoints require the caller's TypeSafe-format bearer key. Forward that key only to the configured llama.cpp backend, with credentials local to the request across every row and coverage retry. Do not compare it with a separate static service token, replace it with an operator runtime key, or fall back to the local test/probe key when it is missing or rejected. Keep per-request authorization out of shared client defaults and mutable global state so concurrent callers cannot exchange credentials. Omit request bodies from logs, redact credentials from diagnostics, and never place keys in State, prompts, or decision JSON.
+
+The backend validates caller keys; verify its authentication behavior for both inference and the model catalog using supported, bounded checks without assuming an authentication endpoint. Startup checks have no caller request, so they may use a separately configured operator probe credential for metadata and synthetic readiness checks. That credential is confined to startup and never authenticates a real user's inference request. A backend that cannot establish the required authenticated behavior must fail readiness rather than silently accepting arbitrary caller keys.
+
+At startup, validate the model metadata, configured alias mapping, backend readiness and credential-validation capabilities, tokenizer compatibility, probability response shape, usage counters, and context capacity. Missing or incompatible requirements must produce actionable diagnostics and prevent serving inference until resolved. Scope probes to metadata and a bounded synthetic fixture; real user evidence is unnecessary for startup checks.
 
 ## Acceptance checks for future implementation
 
@@ -117,7 +127,7 @@ These are required checks, not tests already executed.
 - Backend: missing labels trigger bounded coverage retries; exhausted coverage, malformed distributions, wrong token IDs, incompatible tokenizers, missing counters, and context overflow fail explicitly. Compare representative GGUF fixtures with a trusted Decider inference baseline using a documented numerical tolerance.
 - Async behavior: a slow backend does not block unrelated requests; concurrent work respects the global limit and bounded admission. Exercise cancellation and a deadline that includes queueing and multiple coverage attempts.
 - Accounting: multiple rows, repeated state, retries, caching behavior, and concurrent callers produce attributable counters rather than shared totals.
-- Operations: service and backend credentials remain separate; network exposure requires service authentication; failures and logs do not expose state, prompts, or secrets. Verify unavailable-backend and shutdown behavior.
+- Operations: TypeSafe bearer credentials are required for real-user requests and forwarded to the configured backend, including coverage retries. Different concurrent caller keys remain isolated; startup probe credentials cannot substitute for missing or rejected caller keys. Verify catalog and inference authentication, caller-key rejection, unavailable-backend and shutdown behavior, and that failures/logs never expose State, prompts, or secrets.
 - SDK interoperability: run an official client against a mock-backed service, then an opt-in live smoke check against the configured llama.cpp build. Record actual commands and results; mock checks alone do not prove real GGUF/server compatibility.
 
 Future implementation should include a reproducible dependency manifest and setup/run instructions based on actual entry points. Keep performance claims pending until measurements exist.

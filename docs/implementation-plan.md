@@ -1,6 +1,6 @@
 # TypeSafe-compatible Decider service implementation plan
 
-Status: synthesized from the accepted design on 2026-10-02; the user confirmed the testing seam on the same date. The nine-ticket breakdown was approved and published to the [local tracker](../.scratch/decider-service/issues/) on 2026-10-03 with `ready-for-agent` status. This document plans implementation; application code remains deferred.
+Status: synthesized from the accepted design on 2026-10-02; the user confirmed the testing seam on the same date. The nine-ticket breakdown was approved and published to the [local tracker](../.scratch/decider-service/issues/) on 2026-10-03. Implementation began with the model-catalog slice on 2026-10-03; this document continues to order the remaining work.
 
 ## Problem Statement
 

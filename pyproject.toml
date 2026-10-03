@@ -1,0 +1,47 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "typesafe-decider-service"
+version = "0.1.0"
+description = "TypeSafe-compatible HTTP service for a remote Decider model"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "decider-ai==1.8.1",
+  "fastapi==0.115.12",
+  "httpx==0.28.1",
+  "pydantic-settings==2.12.0",
+  "uvicorn==0.34.2",
+]
+
+[project.scripts]
+decider-service = "decider_service.cli:main"
+decider-service-check = "decider_service.catalog_check:main"
+
+[dependency-groups]
+dev = [
+  "mypy==1.20.2",
+  "pytest==8.4.2",
+  "ruff==0.11.10",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["decider_service"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+extend-exclude = ["decider_wrapper.py", "remote_llamacpp_engine.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["decider_service", "tests"]

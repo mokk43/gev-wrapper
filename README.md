@@ -1,10 +1,36 @@
 # TypeSafe-compatible Decider service
 
-A planned async FastAPI service that accepts TypeSafe's `/v1/systemone` requests, evaluates them using a remotely served decider-4b GGUF model in llama.cpp, and returns TypeSafe-shaped decisions.
+An async FastAPI service being built to accept TypeSafe's `/v1/systemone` requests, evaluate them using a remotely served decider-4b GGUF model in llama.cpp, and return TypeSafe-shaped decisions.
 
 ## Status
 
-The design was accepted on 2026-10-02. Nine implementation tickets were approved and published to the [local tracker](.scratch/decider-service/issues/) on 2026-10-03. Implementation is deferred. The two supplied Python files are reference adapters, not a running web service; there is no supported installation or launch command yet.
+The design was accepted on 2026-10-02. The first implementation slice now provides the configured `GET /v1/models` catalog, strict environment validation, pinned dependencies, and public service/check entry points. Decision inference, caller authentication, and backend readiness are not implemented yet. The catalog is therefore restricted to loopback and is not production-ready. The two original Python files remain reference adapters, not the running service implementation.
+
+## Catalog setup
+
+Install the locked catalog environment:
+
+```shell
+uv sync --python 3.12.5 --locked
+```
+
+Set every required variable in [the configuration reference](docs/configuration.md), then validate and run:
+
+```shell
+uv run decider-service --validate-config
+uv run decider-service
+```
+
+Check the public wire response from another shell. Supply an API key explicitly
+when checking a future authenticated slice:
+
+```shell
+uv run decider-service-check --base-url http://127.0.0.1:8000
+```
+
+The service is pinned to CPython 3.12.5. The locked environment includes the
+inspected `decider-ai==1.8.1` dependency, but the catalog does not load model
+weights or import inference code.
 
 ## Project documents
 
@@ -12,6 +38,9 @@ The design was accepted on 2026-10-02. Nine implementation tickets were approved
 - [Implementation plan](docs/implementation-plan.md): ordered work packages, user stories, testing seam, and completion criteria.
 - [Domain glossary](CONTEXT.md): the meaning of State, Choice, Noul, Score, Decider, and Jev.
 - [Response identity and accounting decision](docs/adr/0001-report-model-identity-and-backend-work.md): why compatible responses expose the actual model and backend work.
+- [Service configuration](docs/configuration.md): required operator inputs, safe defaults, and alias configuration.
+- [Contract and dependency baseline](docs/dependency-baseline.md): pinned revisions, inspected upstream seams, and explicit adaptations.
+- [Captured TypeSafe contract](contracts/README.md): source, hashes, and interoperability client pin.
 - [Agent instructions](AGENTS.md): project scope, document ownership, and working conventions.
 
 ## Reference code

@@ -1,6 +1,6 @@
 # Accepted service design
 
-Status: accepted on 2026-10-02; local development inputs and caller-key forwarding amended by the user on 2026-10-03. Implementation remains deferred.
+Status: accepted on 2026-10-02; local development inputs and caller-key forwarding amended by the user on 2026-10-03. Implementation began with the model-catalog slice on 2026-10-03.
 
 ## Purpose and boundary
 

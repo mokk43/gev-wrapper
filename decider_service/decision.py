@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Lock
 from types import SimpleNamespace
 from typing import Any, TypeVar, cast
 
@@ -201,8 +202,13 @@ class DecisionRuntime:
         self._decider = decider
         self._context_capacity = settings.context_capacity
         self._label_token_ids = tuple(int(token) for token in letter_ids(tokenizer))
+        self._preparation_lock = Lock()
 
     def prepare(self, request: SystemOneRequest) -> PreparedDecision:
+        with self._preparation_lock:
+            return self._prepare_request(request)
+
+    def _prepare_request(self, request: SystemOneRequest) -> PreparedDecision:
         score_legends = {
             name: tuple(question.criteria)
             for name, question in request.questions.items()

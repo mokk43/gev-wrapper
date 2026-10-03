@@ -2020,6 +2020,118 @@ async def test_early_backend_transport_timeout_returns_503(
 
 
 @pytest.mark.anyio
+async def test_abandoned_preparation_does_not_overlap_shared_runtime(
+    metadata_directory: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = configured_settings(
+        metadata_directory,
+        backend_slots=1,
+        admission_capacity=2,
+        request_deadline_seconds=0.05,
+    )
+    runtime = DecisionRuntime(settings)
+    original_prepare_items = runtime._decider._system_one_items
+    preparation_started = threading.Event()
+    preparations_finished = threading.Event()
+    release_preparation = threading.Event()
+    state_lock = threading.Lock()
+    active_preparations = 0
+    maximum_active_preparations = 0
+    preparation_calls = 0
+    finished_preparations = 0
+
+    def gated_prepare_items(*args: Any, **kwargs: Any) -> Any:
+        nonlocal active_preparations
+        nonlocal finished_preparations
+        nonlocal maximum_active_preparations
+        nonlocal preparation_calls
+        with state_lock:
+            preparation_calls += 1
+            call_number = preparation_calls
+            active_preparations += 1
+            maximum_active_preparations = max(
+                maximum_active_preparations,
+                active_preparations,
+            )
+        try:
+            if call_number == 1:
+                preparation_started.set()
+                release_preparation.wait()
+            return original_prepare_items(*args, **kwargs)
+        finally:
+            with state_lock:
+                active_preparations -= 1
+                finished_preparations += 1
+                if finished_preparations == 2:
+                    preparations_finished.set()
+
+    monkeypatch.setattr(
+        runtime._decider,
+        "_system_one_items",
+        gated_prepare_items,
+    )
+
+    app = create_app(
+        settings,
+        backend_transport=httpx.MockTransport(
+            lambda _request: completion_response({1: 0.7, 2: 0.3})
+        ),
+    )
+
+    try:
+        async with (
+            app.router.lifespan_context(app),
+            service_client(app) as client,
+        ):
+            app.state.decision_runtime = runtime
+            first_request = asyncio.create_task(
+                client.post(
+                    "/v1/systemone",
+                    headers={"Authorization": "Bearer first-key"},
+                    json=choice_request_payload(),
+                )
+            )
+            await asyncio.wait_for(
+                asyncio.to_thread(preparation_started.wait),
+                timeout=2,
+            )
+            first_expired = await asyncio.wait_for(first_request, timeout=2)
+            second_expired = await asyncio.wait_for(
+                client.post(
+                    "/v1/systemone",
+                    headers={"Authorization": "Bearer second-key"},
+                    json=choice_request_payload(),
+                ),
+                timeout=2,
+            )
+            calls_before_release = preparation_calls
+            maximum_before_release = maximum_active_preparations
+            release_preparation.set()
+            await asyncio.wait_for(
+                asyncio.to_thread(preparations_finished.wait),
+                timeout=2,
+            )
+
+            assert first_expired.status_code == 504
+            assert second_expired.status_code == 504
+            assert calls_before_release == 1
+            assert maximum_before_release == 1
+
+            after_release = await client.post(
+                "/v1/systemone",
+                headers={"Authorization": "Bearer next-key"},
+                json=choice_request_payload(),
+            )
+
+        assert after_release.status_code == 200
+        assert preparation_calls == 3
+        assert maximum_active_preparations == 1
+    finally:
+        release_preparation.set()
+
+
+@pytest.mark.anyio
 async def test_abandoned_preparation_remains_bounded_after_deadline(
     metadata_directory: Path,
     monkeypatch: pytest.MonkeyPatch,

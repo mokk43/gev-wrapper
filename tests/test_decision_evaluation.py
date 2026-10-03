@@ -114,6 +114,15 @@ def choice_request_payload() -> dict[str, Any]:
     }
 
 
+def multi_row_choice_request_payload() -> dict[str, Any]:
+    payload = choice_request_payload()
+    payload["questions"]["owner"] = {
+        "type": "choice",
+        "criteria": {"support": None, "sales": None},
+    }
+    return payload
+
+
 def completion_response(
     probabilities: dict[int, float],
     *,
@@ -1781,11 +1790,7 @@ async def test_backend_slots_bound_rows_within_one_request(
         ),
         backend_transport=httpx.MockTransport(backend),
     )
-    payload = choice_request_payload()
-    payload["questions"]["owner"] = {
-        "type": "choice",
-        "criteria": {"support": None, "sales": None},
-    }
+    payload = multi_row_choice_request_payload()
 
     async def release_after_first_starts() -> None:
         await first_started.wait()
@@ -1839,11 +1844,7 @@ async def test_backend_slots_are_global_across_multi_row_callers(
         ),
         backend_transport=httpx.MockTransport(backend),
     )
-    payload = choice_request_payload()
-    payload["questions"]["owner"] = {
-        "type": "choice",
-        "criteria": {"support": None, "sales": None},
-    }
+    payload = multi_row_choice_request_payload()
 
     async with (
         app.router.lifespan_context(app),
@@ -1958,11 +1959,7 @@ async def test_request_deadline_cancels_backend_work_and_releases_capacity(
         ),
         backend_transport=httpx.MockTransport(backend),
     )
-    payload = choice_request_payload()
-    payload["questions"]["owner"] = {
-        "type": "choice",
-        "criteria": {"support": None, "sales": None},
-    }
+    payload = multi_row_choice_request_payload()
 
     async with (
         app.router.lifespan_context(app),
@@ -2278,6 +2275,18 @@ async def test_shutdown_awaits_abandoned_offloaded_work(
     lifespan = app.router.lifespan_context(app)
     await lifespan.__aenter__()
     app.state.decision_runtime = runtime
+    original_capacity_close = app.state.decision_capacity.close
+    shutdown_started = asyncio.Event()
+
+    async def signal_shutdown_started() -> None:
+        shutdown_started.set()
+        await original_capacity_close()
+
+    monkeypatch.setattr(
+        app.state.decision_capacity,
+        "close",
+        signal_shutdown_started,
+    )
     client = service_client(app)
     shutdown_task: asyncio.Task[bool | None] | None = None
     try:
@@ -2293,7 +2302,7 @@ async def test_shutdown_awaits_abandoned_offloaded_work(
         assert response.status_code == 504
 
         shutdown_task = asyncio.create_task(lifespan.__aexit__(None, None, None))
-        await asyncio.sleep(0)
+        await asyncio.wait_for(shutdown_started.wait(), timeout=2)
         assert not shutdown_task.done()
 
         release_preparation.set()
@@ -2333,11 +2342,7 @@ async def test_caller_disconnect_stops_pending_rows_and_releases_capacity(
         ),
         backend_transport=httpx.MockTransport(backend),
     )
-    payload = choice_request_payload()
-    payload["questions"]["owner"] = {
-        "type": "choice",
-        "criteria": {"support": None, "sales": None},
-    }
+    payload = multi_row_choice_request_payload()
     body = json.dumps(payload).encode()
     incoming: asyncio.Queue[Message] = asyncio.Queue()
     sent: list[Message] = []

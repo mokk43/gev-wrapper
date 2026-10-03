@@ -333,6 +333,7 @@ async def _evaluate_row(
     label_token_ids: tuple[int, ...],
     bearer_token: str,
     probability_coverage: int,
+    deadline: float,
 ) -> BackendRow:
     payload = {
         "prompt": list(row.token_ids),
@@ -352,14 +353,20 @@ async def _evaluate_row(
     }
     try:
         async with capacity.backend_slot():
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise TimeoutError
             response = await client.post(
                 "/completion",
                 headers={"Authorization": f"Bearer {bearer_token}"},
                 json=payload,
+                timeout=remaining,
             )
             if response.status_code in {401, 403}:
                 raise CallerAuthenticationError(response.status_code)
             response.raise_for_status()
+    except httpx.TimeoutException as exc:
+        raise TimeoutError from exc
     except httpx.RequestError as exc:
         raise BackendUnavailableError("backend request failed") from exc
     except httpx.HTTPStatusError as exc:
@@ -460,6 +467,7 @@ async def evaluate_request(
     capacity: InferenceCapacity,
     bearer_token: str,
     probability_coverage: int,
+    deadline: float,
 ) -> tuple[dict[str, Answer], int, int]:
     prepared = await asyncio.to_thread(runtime.prepare, request)
     if not prepared.rows:
@@ -473,6 +481,7 @@ async def evaluate_request(
                 prepared.label_token_ids,
                 bearer_token,
                 probability_coverage,
+                deadline,
             )
             for row in prepared.rows
         )

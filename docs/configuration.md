@@ -32,7 +32,7 @@ not committed.
 | `DECIDER_MODEL_ALIASES` | `[]` | JSON array of deliberately enabled compatibility aliases. No alias, including `jev-latest`, is implicit. |
 | `DECIDER_BIND_HOST` | `127.0.0.1` | Listen address. This catalog slice rejects non-loopback addresses until authentication and exposure checks are implemented. |
 | `DECIDER_BIND_PORT` | `8000` | Listen port. |
-| `DECIDER_REQUEST_DEADLINE_SECONDS` | `60` | Whole-request deadline reserved for the later deadline/cancellation slice; not yet enforced. |
+| `DECIDER_REQUEST_DEADLINE_SECONDS` | `60` | Whole-request deadline in seconds across admission, offloaded preparation, backend-slot waiting, evaluation, and assembly. Each backend transport timeout is limited to the remaining request budget. |
 | `DECIDER_INITIAL_PROBABILITY_COVERAGE` | `256` | llama.cpp `n_probs` used by Choice evaluation. Missing required labels currently fail with 502; recovery is a later slice. |
 | `DECIDER_OPERATOR_PROBE_API_KEY` | unset | Optional startup-readiness credential. This slice does not send it or use it as a caller fallback. |
 
@@ -47,3 +47,13 @@ lifecycle-managed backend HTTP client. Backend evaluations and admitted
 requests are bounded per process by the configured capacities. No readiness
 request is made and backend availability, counter semantics, and artifact
 compatibility remain unverified.
+
+Run one service worker. Each additional worker would create independent
+admission and backend-slot limits; multi-worker operation requires coordinated
+capacity management that this service does not implement. Deadline expiry,
+caller cancellation or disconnect, and shutdown cancel pending asyncio work and
+release per-process capacity. Cancelling an outstanding HTTP request closes the
+client-side operation but does not prove that llama.cpp stopped inference.
+Python cannot stop preparation or assembly already executing in a worker thread;
+the request stops awaiting that work, and the thread finishes under the event
+loop executor's lifecycle.

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Coroutine
 from contextlib import asynccontextmanager
 from datetime import date
-from typing import Annotated
+from typing import Annotated, Any, TypeVar
 
 import httpx
 from decider.systemone import MAX_LEVELS  # type: ignore[import-untyped]
@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from decider_service.config import Settings, load_settings
-from decider_service.contracts import SystemOneRequest, SystemOneResponse, Usage
+from decider_service.contracts import Answer, SystemOneRequest, SystemOneResponse, Usage
 from decider_service.decision import (
     AdmissionCapacityError,
     BackendContractError,
@@ -50,6 +50,70 @@ _REQUEST_TOO_LARGE_DETAIL = [
         "type": "request_too_large",
     }
 ]
+_Result = TypeVar("_Result")
+
+
+class ActiveRequests:
+    def __init__(self) -> None:
+        self._tasks: set[asyncio.Task[Any]] = set()
+        self._runners: set[asyncio.Task[Any]] = set()
+        self._idle = asyncio.Event()
+        self._idle.set()
+        self._closing = False
+
+    async def run(
+        self,
+        work: Coroutine[Any, Any, _Result],
+        request: Request,
+    ) -> _Result:
+        if self._closing:
+            work.close()
+            raise RuntimeError("decision service is shutting down")
+        runner = asyncio.current_task()
+        if runner is None:
+            work.close()
+            raise RuntimeError("decision request has no owning task")
+        task = asyncio.create_task(work)
+        disconnected = asyncio.create_task(self._wait_for_disconnect(request))
+        self._tasks.add(task)
+        self._runners.add(runner)
+        self._idle.clear()
+        try:
+            completed, _pending = await asyncio.wait(
+                (task, disconnected),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if task in completed:
+                return await task
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            raise asyncio.CancelledError
+        except BaseException:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            raise
+        finally:
+            disconnected.cancel()
+            await asyncio.gather(disconnected, return_exceptions=True)
+            self._tasks.discard(task)
+            self._runners.discard(runner)
+            if not self._runners:
+                self._idle.set()
+
+    @staticmethod
+    async def _wait_for_disconnect(request: Request) -> None:
+        while True:
+            if (await request.receive())["type"] == "http.disconnect":
+                return
+
+    async def close(self) -> None:
+        self._closing = True
+        tasks = tuple(self._tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        await self._idle.wait()
 
 
 def _request_too_large_response() -> JSONResponse:
@@ -141,7 +205,11 @@ def create_app(
                 backend_slots=settings.backend_slots,
                 admission_capacity=settings.admission_capacity,
             )
-            yield
+            app.state.active_requests = ActiveRequests()
+            try:
+                yield
+            finally:
+                await app.state.active_requests.close()
 
     app = FastAPI(title="TypeSafe-compatible Decider service", lifespan=lifespan)
     app.add_middleware(
@@ -190,6 +258,7 @@ def create_app(
     @app.post("/v1/systemone", response_model=SystemOneResponse)
     async def system_one(
         request: SystemOneRequest,
+        http_request: Request,
         authorization: Annotated[str | None, Header()] = None,
     ) -> SystemOneResponse:
         if authorization is None or not authorization.startswith("Bearer "):
@@ -224,7 +293,9 @@ def create_app(
                     "option count exceeds configured capacity",
                     "option_capacity",
                 )
-        try:
+        deadline = asyncio.get_running_loop().time() + settings.request_deadline_seconds
+
+        async def evaluate_admitted_request() -> tuple[dict[str, Answer], int, int]:
             async with app.state.inference_capacity.admit():
                 runtime = app.state.decision_runtime
                 if runtime is None:
@@ -233,14 +304,31 @@ def create_app(
                         if runtime is None:
                             runtime = await asyncio.to_thread(DecisionRuntime, settings)
                             app.state.decision_runtime = runtime
-                answers, input_tokens, output_tokens = await evaluate_request(
+                return await evaluate_request(
                     request,
                     runtime=runtime,
                     client=app.state.backend_client,
                     capacity=app.state.inference_capacity,
                     bearer_token=bearer_token,
                     probability_coverage=settings.initial_probability_coverage,
+                    deadline=deadline,
                 )
+
+        try:
+            async with asyncio.timeout_at(deadline):
+                (
+                    answers,
+                    input_tokens,
+                    output_tokens,
+                ) = await app.state.active_requests.run(
+                    evaluate_admitted_request(),
+                    http_request,
+                )
+        except TimeoutError as exc:
+            raise HTTPException(
+                status_code=504,
+                detail="Decision request deadline expired.",
+            ) from exc
         except AdmissionCapacityError as exc:
             raise HTTPException(
                 status_code=503,

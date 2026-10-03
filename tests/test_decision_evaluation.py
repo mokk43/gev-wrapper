@@ -12,6 +12,7 @@ from typing import Any, cast
 import httpx
 import pytest
 from fastapi import FastAPI
+from starlette.types import Message, Scope
 from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import PreTrainedTokenizerFast
 
@@ -1865,6 +1866,225 @@ async def test_exhausted_admission_rejects_without_backend_work(
     assert rejected.json() == {"detail": "Decision service is at capacity."}
     assert after_release.status_code == 200
     assert backend_keys == ["Bearer slow-key", "Bearer next-key"]
+
+
+@pytest.mark.anyio
+async def test_request_deadline_cancels_backend_work_and_releases_capacity(
+    metadata_directory: Path,
+) -> None:
+    slow_started = asyncio.Event()
+    slow_cancelled = asyncio.Event()
+    backend_keys: list[str] = []
+    transport_timeouts: list[dict[str, float]] = []
+
+    async def backend(request: httpx.Request) -> httpx.Response:
+        key = request.headers["Authorization"]
+        backend_keys.append(key)
+        transport_timeouts.append(request.extensions["timeout"])
+        if key == "Bearer slow-key":
+            slow_started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                slow_cancelled.set()
+        return completion_response({1: 0.7, 2: 0.3})
+
+    app = create_app(
+        configured_settings(
+            metadata_directory,
+            backend_slots=1,
+            admission_capacity=1,
+            request_deadline_seconds=0.05,
+        ),
+        backend_transport=httpx.MockTransport(backend),
+    )
+    payload = choice_request_payload()
+    payload["questions"]["owner"] = {
+        "type": "choice",
+        "criteria": {"support": None, "sales": None},
+    }
+
+    async with (
+        app.router.lifespan_context(app),
+        service_client(app) as client,
+    ):
+        slow_task = asyncio.create_task(
+            client.post(
+                "/v1/systemone",
+                headers={"Authorization": "Bearer slow-key"},
+                json=payload,
+            )
+        )
+        await asyncio.wait_for(slow_started.wait(), timeout=2)
+        expired = await asyncio.wait_for(slow_task, timeout=2)
+        await asyncio.wait_for(slow_cancelled.wait(), timeout=2)
+        after_expiry = await client.post(
+            "/v1/systemone",
+            headers={"Authorization": "Bearer next-key"},
+            json=choice_request_payload(),
+        )
+
+    assert expired.status_code == 504
+    assert expired.json() == {"detail": "Decision request deadline expired."}
+    assert after_expiry.status_code == 200
+    assert backend_keys == ["Bearer slow-key", "Bearer next-key"]
+    assert all(
+        0 < timeout <= 0.05
+        for transport_timeout in transport_timeouts
+        for timeout in transport_timeout.values()
+    )
+
+
+@pytest.mark.anyio
+async def test_request_budget_transport_timeout_returns_504(
+    metadata_directory: Path,
+) -> None:
+    def backend(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("remaining request budget expired", request=request)
+
+    app = create_app(
+        configured_settings(metadata_directory),
+        backend_transport=httpx.MockTransport(backend),
+    )
+
+    async with (
+        app.router.lifespan_context(app),
+        service_client(app) as client,
+    ):
+        response = await client.post(
+            "/v1/systemone",
+            headers={"Authorization": "Bearer caller-key"},
+            json=choice_request_payload(),
+        )
+
+    assert response.status_code == 504
+    assert response.json() == {"detail": "Decision request deadline expired."}
+    assert "remaining request budget expired" not in response.text
+
+
+@pytest.mark.anyio
+async def test_shutdown_cancels_inflight_backend_work(
+    metadata_directory: Path,
+) -> None:
+    backend_started = asyncio.Event()
+    backend_cancelled = asyncio.Event()
+
+    async def backend(_request: httpx.Request) -> httpx.Response:
+        backend_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            backend_cancelled.set()
+        raise AssertionError("cancelled backend request must not resume")
+
+    app = create_app(
+        configured_settings(metadata_directory),
+        backend_transport=httpx.MockTransport(backend),
+    )
+    lifespan = app.router.lifespan_context(app)
+    await lifespan.__aenter__()
+    client = service_client(app)
+    request_task: asyncio.Task[httpx.Response] | None = None
+    try:
+        request_task = asyncio.create_task(
+            client.post(
+                "/v1/systemone",
+                headers={"Authorization": "Bearer caller-key"},
+                json=choice_request_payload(),
+            )
+        )
+        await asyncio.wait_for(backend_started.wait(), timeout=2)
+
+        await asyncio.wait_for(lifespan.__aexit__(None, None, None), timeout=2)
+
+        await asyncio.wait_for(backend_cancelled.wait(), timeout=2)
+        assert request_task.done()
+    finally:
+        if request_task is not None and not request_task.done():
+            request_task.cancel()
+        if request_task is not None:
+            await asyncio.gather(request_task, return_exceptions=True)
+        await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_caller_disconnect_stops_pending_rows_and_releases_capacity(
+    metadata_directory: Path,
+) -> None:
+    backend_started = asyncio.Event()
+    backend_cancelled = asyncio.Event()
+    backend_keys: list[str] = []
+
+    async def backend(request: httpx.Request) -> httpx.Response:
+        key = request.headers["Authorization"]
+        backend_keys.append(key)
+        if key == "Bearer disconnected-key":
+            backend_started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                backend_cancelled.set()
+        return completion_response({1: 0.7, 2: 0.3})
+
+    app = create_app(
+        configured_settings(
+            metadata_directory,
+            backend_slots=1,
+            admission_capacity=1,
+        ),
+        backend_transport=httpx.MockTransport(backend),
+    )
+    payload = choice_request_payload()
+    payload["questions"]["owner"] = {
+        "type": "choice",
+        "criteria": {"support": None, "sales": None},
+    }
+    body = json.dumps(payload).encode()
+    incoming: asyncio.Queue[Message] = asyncio.Queue()
+    sent: list[Message] = []
+    scope: Scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/v1/systemone",
+        "raw_path": b"/v1/systemone",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [
+            (b"authorization", b"Bearer disconnected-key"),
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(body)).encode()),
+        ],
+        "client": ("127.0.0.1", 12345),
+        "server": ("127.0.0.1", 8000),
+    }
+
+    async def receive() -> Message:
+        return await incoming.get()
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    async with app.router.lifespan_context(app):
+        await incoming.put({"type": "http.request", "body": body, "more_body": False})
+        disconnected_request = asyncio.create_task(app(scope, receive, send))
+        await asyncio.wait_for(backend_started.wait(), timeout=2)
+        await incoming.put({"type": "http.disconnect"})
+
+        await asyncio.wait_for(backend_cancelled.wait(), timeout=2)
+        await asyncio.gather(disconnected_request, return_exceptions=True)
+        async with service_client(app) as client:
+            after_disconnect = await client.post(
+                "/v1/systemone",
+                headers={"Authorization": "Bearer next-key"},
+                json=choice_request_payload(),
+            )
+
+    assert sent == []
+    assert after_disconnect.status_code == 200
+    assert backend_keys == ["Bearer disconnected-key", "Bearer next-key"]
 
 
 @pytest.mark.anyio

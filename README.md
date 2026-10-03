@@ -10,10 +10,12 @@ Noul, and Score questions, including mixed requests. Decision requests use
 pinned Decider preparation, per-type calibration, upstream assembly, and
 llama.cpp's native `/completion` endpoint through one shared async client.
 Per-process admission and backend evaluation limits are enforced from the
-configured capacities. Coverage recovery, whole-request deadlines,
-disconnect/cancellation handling, readiness checks, and the final catalog
-authentication boundary remain separate implementation slices. The service
-remains restricted to loopback and is not production-ready.
+configured capacities. One whole-request deadline covers admitted preparation,
+backend-slot waiting, evaluation, and assembly; expiry, caller disconnect, and
+shutdown cancel pending request tasks and release service capacity. Coverage
+recovery, readiness checks, and the final catalog authentication boundary remain
+separate implementation slices. The service remains restricted to loopback and
+is not production-ready.
 
 ## Catalog setup
 

@@ -50,8 +50,12 @@ requirements. Inspection found these differences in the pinned upstream code:
   rejects complete prompts that exceed capacity.
 - Upstream accepts Choice arrays, Score maps, a `bool` type, and omitted Choice
   discriminators, while the pinned HTTP contract is narrower.
-- Upstream rejects a one-level Score rubric. The HTTP contract permits one, so
-  the accepted design records a preparation-only case.
+- Upstream rejects a one-level Score rubric before assembly. The HTTP contract
+  permits one, so the service handles it as a preparation-only answer: level 0
+  has probability 1, expected score 0, and confidence 1, with zero backend
+  work. These values match the pinned assembler's normalization, expected-level,
+  and single-level confidence formulas without invoking its two-level prompt
+  assertion.
 - Upstream assembly emits extension fields such as `x_p_max`, `certainty`,
   `level_fit`, and `fit_mass`; those fields are absent from the HTTP contract.
 - Upstream logical token accounting and shared mutable engine counters do not

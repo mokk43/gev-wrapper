@@ -5,15 +5,15 @@ An async FastAPI service being built to accept TypeSafe's `/v1/systemone` reques
 ## Status
 
 The design was accepted on 2026-10-02. The service now provides the configured
-`GET /v1/models` catalog and async `POST /v1/systemone` evaluation for Choice and
-Noul questions, including mixed requests. Decision requests use pinned Decider
-preparation, per-type calibration, upstream assembly, and llama.cpp's native
-`/completion` endpoint through one shared async client. Per-process admission and
-backend evaluation limits are enforced from the configured capacities. Score,
-coverage recovery, whole-request deadlines, disconnect/cancellation handling,
-readiness checks, and the final catalog authentication boundary remain separate
-implementation slices. The service remains restricted to loopback and is not
-production-ready.
+`GET /v1/models` catalog and async `POST /v1/systemone` evaluation for Choice,
+Noul, and Score questions, including mixed requests. Decision requests use
+pinned Decider preparation, per-type calibration, upstream assembly, and
+llama.cpp's native `/completion` endpoint through one shared async client.
+Per-process admission and backend evaluation limits are enforced from the
+configured capacities. Coverage recovery, whole-request deadlines,
+disconnect/cancellation handling, readiness checks, and the final catalog
+authentication boundary remain separate implementation slices. The service
+remains restricted to loopback and is not production-ready.
 
 ## Catalog setup
 
@@ -41,7 +41,7 @@ The service is pinned to CPython 3.12.5 and `decider-ai==1.8.1`. It loads only
 matching tokenizer/configuration metadata. Model weights remain on the external
 llama.cpp backend.
 
-Submit Choice and Noul questions with the caller's backend credential:
+Submit Choice, Noul, and Score questions with the caller's backend credential:
 
 ```shell
 curl http://127.0.0.1:8000/v1/systemone \
@@ -59,6 +59,11 @@ curl http://127.0.0.1:8000/v1/systemone \
       "is_outage": {
         "type": "noul",
         "instructions": "Is the production service unavailable?"
+      },
+      "urgency": {
+        "type": "score",
+        "instructions": "How urgently should we respond?",
+        "criteria": ["Can wait", "Needs attention", "Act now"]
       }
     }
   }'

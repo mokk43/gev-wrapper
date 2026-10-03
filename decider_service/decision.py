@@ -28,7 +28,14 @@ from decider.systemone import (  # type: ignore[import-untyped]
 from transformers import AutoTokenizer
 
 from decider_service.config import Settings
-from decider_service.contracts import Answer, ChoiceAnswer, NoulAnswer, SystemOneRequest
+from decider_service.contracts import (
+    Answer,
+    ChoiceAnswer,
+    NoulAnswer,
+    ScoreAnswer,
+    StructuredValue,
+    SystemOneRequest,
+)
 
 
 class PublicInputError(Exception):
@@ -65,9 +72,7 @@ class AdmissionCapacityError(Exception):
 class InferenceCapacity:
     def __init__(self, *, backend_slots: int, admission_capacity: int) -> None:
         self._backend_slots = asyncio.Semaphore(backend_slots)
-        self._admitted: asyncio.Queue[None] = asyncio.Queue(
-            maxsize=admission_capacity
-        )
+        self._admitted: asyncio.Queue[None] = asyncio.Queue(maxsize=admission_capacity)
 
     @asynccontextmanager
     async def admit(self) -> AsyncIterator[None]:
@@ -99,6 +104,9 @@ class PreparedDecision:
     rows: tuple[PreparedRow, ...]
     temperatures: float | list[float]
     label_token_ids: tuple[int, ...]
+    score_legends: dict[str, tuple[StructuredValue, ...]]
+    prepared_answers: dict[str, Answer]
+    answer_order: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -106,6 +114,18 @@ class BackendRow:
     log_probabilities: tuple[float, ...]
     input_tokens: int
     output_tokens: int
+
+
+def _question_name_for_row(
+    answer_index: list[tuple[str, str, int, int]],
+    row_number: int,
+) -> str:
+    for question_name, _kind, first_row, row_count in answer_index:
+        if first_row <= row_number < first_row + row_count:
+            return question_name
+    raise BackendContractError(
+        "Pinned Decider preparation did not map every row to an answer"
+    )
 
 
 class DecisionRuntime:
@@ -131,9 +151,7 @@ class DecisionRuntime:
         decider.neutralize_none = bool(config.get("neutralize_none", True))
         decider.m = SimpleNamespace(tok=tokenizer)
         decider.chat = (
-            chat_template(tokenizer)
-            if resolve_layout(config) == "chat"
-            else None
+            chat_template(tokenizer) if resolve_layout(config) == "chat" else None
         )
         (decider.T, decider.T_by_type), _ = decider_temperature.from_config(
             config,
@@ -146,9 +164,26 @@ class DecisionRuntime:
         self._label_token_ids = tuple(int(token) for token in letter_ids(tokenizer))
 
     def prepare(self, request: SystemOneRequest) -> PreparedDecision:
+        score_legends = {
+            name: tuple(question.criteria)
+            for name, question in request.questions.items()
+            if question.type == "score"
+        }
+        prepared_answers: dict[str, Answer] = {
+            name: ScoreAnswer(
+                type="score",
+                score=0.0,
+                confidence=1.0,
+                legend={"0": question.criteria[0]},
+                probabilities={"0": 1.0},
+            )
+            for name, question in request.questions.items()
+            if question.type == "score" and len(question.criteria) == 1
+        }
         questions: dict[str, dict[str, Any]] = {
             name: question.model_dump(mode="python")
             for name, question in request.questions.items()
+            if name not in prepared_answers
         }
         for question in questions.values():
             if question["type"] == "noul" and question.get("instructions") in (
@@ -156,21 +191,24 @@ class DecisionRuntime:
                 "",
             ):
                 question["instructions"] = NOUL_WITHOUT_INSTRUCTIONS
-        try:
-            rendered, answer_index, items = self._decider._system_one_items(
-                request.state,
-                questions,
-                independent=True,
-                max_state_tokens=sys.maxsize,
-                layout="state_first",
-                isolated=None,
-            )
-        except (AssertionError, TypeError, ValueError) as exc:
-            raise PublicInputError(
-                ("questions",),
-                str(exc),
-                "value_error",
-            ) from exc
+        if questions:
+            try:
+                rendered, answer_index, items = self._decider._system_one_items(
+                    request.state,
+                    questions,
+                    independent=True,
+                    max_state_tokens=sys.maxsize,
+                    layout="state_first",
+                    isolated=None,
+                )
+            except (AssertionError, TypeError, ValueError) as exc:
+                raise PublicInputError(
+                    ("questions",),
+                    str(exc),
+                    "value_error",
+                ) from exc
+        else:
+            rendered, answer_index, items = {}, [], []
 
         prepared_rows: list[PreparedRow] = []
         for item_number, item in enumerate(items):
@@ -189,7 +227,7 @@ class DecisionRuntime:
                     "Pinned Decider preparation did not produce one final answer slot"
                 )
             if len(token_ids) + 1 > self._context_capacity:
-                question_name = answer_index[item_number][0]
+                question_name = _question_name_for_row(answer_index, item_number)
                 raise PublicInputError(
                     ("questions", question_name),
                     "complete rendered prompt exceeds configured backend "
@@ -218,6 +256,9 @@ class DecisionRuntime:
             rows=tuple(prepared_rows),
             temperatures=temperatures,
             label_token_ids=self._label_token_ids,
+            score_legends=score_legends,
+            prepared_answers=prepared_answers,
+            answer_order=tuple(request.questions),
         )
 
 
@@ -375,13 +416,32 @@ def _calibrate_and_assemble(
             or not 0.0 <= confidence <= 1.0
         ):
             raise BackendContractError("assembled confidence is invalid")
+        if raw_answer.get("type") == "score":
+            score = raw_answer.get("score")
+            legend = prepared.score_legends[name]
+            if (
+                isinstance(score, bool)
+                or not isinstance(score, int | float)
+                or not math.isfinite(score)
+                or not 0.0 <= score <= len(legend) - 1
+            ):
+                raise BackendContractError("assembled Score value is invalid")
+            answers[name] = ScoreAnswer(
+                type="score",
+                score=float(score),
+                confidence=float(confidence),
+                legend={str(index): value for index, value in enumerate(legend)},
+                probabilities=probabilities,
+            )
+            continue
         answers[name] = ChoiceAnswer(
             type="choice",
             choice=raw_answer["choice"],
             confidence=float(confidence),
             probabilities=probabilities,
         )
-    return answers
+    answers.update(prepared.prepared_answers)
+    return {name: answers[name] for name in prepared.answer_order}
 
 
 async def evaluate_request(
@@ -394,6 +454,8 @@ async def evaluate_request(
     probability_coverage: int,
 ) -> tuple[dict[str, Answer], int, int]:
     prepared = await asyncio.to_thread(runtime.prepare, request)
+    if not prepared.rows:
+        return prepared.prepared_answers.copy(), 0, 0
     rows = await asyncio.gather(
         *(
             _evaluate_row(

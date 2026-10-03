@@ -268,6 +268,201 @@ async def test_noul_is_evaluated_through_the_public_http_boundary(
 
 
 @pytest.mark.anyio
+async def test_score_is_evaluated_as_an_expected_level_through_public_http(
+    metadata_directory: Path,
+) -> None:
+    backend_requests: list[httpx.Request] = []
+    fit_probabilities = [0.1, 0.3, 0.6]
+
+    def backend(request: httpx.Request) -> httpx.Response:
+        backend_requests.append(request)
+        fit_probability = fit_probabilities[len(backend_requests) - 1]
+        return completion_response(
+            {1: 1.0 - fit_probability, 2: fit_probability},
+            input_tokens=len(backend_requests) * 10,
+        )
+
+    app = create_app(
+        configured_settings(metadata_directory),
+        backend_transport=httpx.MockTransport(backend),
+    )
+
+    async with (
+        app.router.lifespan_context(app),
+        service_client(app) as client,
+    ):
+        response = await client.post(
+            "/v1/systemone",
+            headers={"Authorization": "Bearer caller-key"},
+            json={
+                "model": "jev-latest",
+                "state": {"incident": ["checkout", "down"]},
+                "questions": {
+                    "urgency": {
+                        "type": "score",
+                        "instructions": ["Rate", {"timeframe": "today"}],
+                        "criteria": [
+                            "Can wait",
+                            {"window": "this week"},
+                            ["Act", "today"],
+                        ],
+                    }
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "model": "decider-4b-q4-k-m",
+        "answers": {
+            "urgency": {
+                "type": "score",
+                "score": 1.5,
+                "confidence": 0.25,
+                "legend": {
+                    "0": "Can wait",
+                    "1": {"window": "this week"},
+                    "2": ["Act", "today"],
+                },
+                "probabilities": {"0": 0.1, "1": 0.3, "2": 0.6},
+            }
+        },
+        "usage": {"input_tokens": 60, "output_tokens": 3},
+    }
+    assert len(backend_requests) == 3
+    assert all(
+        json.loads(request.content)["n_predict"] == 1 for request in backend_requests
+    )
+
+
+@pytest.mark.anyio
+async def test_one_level_score_is_prepared_without_backend_work(
+    metadata_directory: Path,
+) -> None:
+    backend_requests: list[httpx.Request] = []
+
+    def backend(request: httpx.Request) -> httpx.Response:
+        backend_requests.append(request)
+        raise AssertionError("one-level Score must not require inference")
+
+    app = create_app(
+        configured_settings(metadata_directory),
+        backend_transport=httpx.MockTransport(backend),
+    )
+
+    async with (
+        app.router.lifespan_context(app),
+        service_client(app) as client,
+    ):
+        response = await client.post(
+            "/v1/systemone",
+            headers={"Authorization": "Bearer caller-key"},
+            json={
+                "model": "decider-4b-q4-k-m",
+                "state": "evidence",
+                "questions": {
+                    "classification": {
+                        "type": "score",
+                        "criteria": [{"only": ["applicable", "level"]}],
+                    }
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "model": "decider-4b-q4-k-m",
+        "answers": {
+            "classification": {
+                "type": "score",
+                "score": 0.0,
+                "confidence": 1.0,
+                "legend": {"0": {"only": ["applicable", "level"]}},
+                "probabilities": {"0": 1.0},
+            }
+        },
+        "usage": {"input_tokens": 0, "output_tokens": 0},
+    }
+    assert backend_requests == []
+
+
+@pytest.mark.anyio
+async def test_mixed_choice_and_nonisolated_score_use_per_type_calibration_once(
+    metadata_directory: Path,
+) -> None:
+    (metadata_directory / "decider_config.json").write_text(
+        json.dumps(
+            {
+                "version": "test",
+                "temperature": 1.0,
+                "temperature_by_type": {"choice": 1.0, "score": 2.0},
+                "neutralize_none": True,
+                "isolated_levels": False,
+            }
+        )
+    )
+    backend_requests: list[httpx.Request] = []
+
+    def backend(request: httpx.Request) -> httpx.Response:
+        backend_requests.append(request)
+        return completion_response(
+            {1: 0.81, 2: 0.09},
+            input_tokens=len(backend_requests) * 10,
+        )
+
+    app = create_app(
+        configured_settings(metadata_directory),
+        backend_transport=httpx.MockTransport(backend),
+    )
+
+    async with (
+        app.router.lifespan_context(app),
+        service_client(app) as client,
+    ):
+        response = await client.post(
+            "/v1/systemone",
+            headers={"Authorization": "Bearer caller-key"},
+            json={
+                "model": "decider-4b-q4-k-m",
+                "state": "evidence",
+                "questions": {
+                    "priority": {
+                        "type": "choice",
+                        "criteria": {"urgent": None, "routine": None},
+                    },
+                    "severity": {
+                        "type": "score",
+                        "instructions": "Rate severity.",
+                        "criteria": ["low", "high"],
+                    },
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "model": "decider-4b-q4-k-m",
+        "answers": {
+            "priority": {
+                "type": "choice",
+                "choice": "urgent",
+                "confidence": 0.8,
+                "probabilities": {"urgent": 0.9, "routine": 0.1},
+            },
+            "severity": {
+                "type": "score",
+                "score": 0.25,
+                "confidence": 0.5,
+                "legend": {"0": "low", "1": "high"},
+                "probabilities": {"0": 0.75, "1": 0.25},
+            },
+        },
+        "usage": {"input_tokens": 30, "output_tokens": 2},
+    }
+    assert len(backend_requests) == 2
+
+
+@pytest.mark.anyio
 async def test_multiple_choices_apply_temperature_once_and_sum_row_usage(
     metadata_directory: Path,
 ) -> None:
@@ -340,9 +535,9 @@ async def test_multiple_choices_apply_temperature_once_and_sum_row_usage(
         },
     }
     assert len(backend_requests) == 2
-    assert {
-        request.headers["Authorization"] for request in backend_requests
-    } == {"Bearer multi-row-key"}
+    assert {request.headers["Authorization"] for request in backend_requests} == {
+        "Bearer multi-row-key"
+    }
 
 
 @pytest.mark.anyio
@@ -412,9 +607,9 @@ async def test_mixed_questions_apply_type_calibration_once_and_sum_usage(
         "usage": {"input_tokens": 30, "output_tokens": 2},
     }
     assert len(backend_requests) == 2
-    assert {
-        request.headers["Authorization"] for request in backend_requests
-    } == {"Bearer mixed-key"}
+    assert {request.headers["Authorization"] for request in backend_requests} == {
+        "Bearer mixed-key"
+    }
 
 
 @pytest.mark.anyio
@@ -492,9 +687,7 @@ async def test_mixed_questions_apply_type_calibration_once_and_sum_usage(
             {
                 "model": "decider-4b-q4-k-m",
                 "state": "evidence",
-                "questions": {
-                    "check": {"type": "noul", "criteria": ["no", "yes"]}
-                },
+                "questions": {"check": {"type": "noul", "criteria": ["no", "yes"]}},
             },
             "criteria",
         ),
@@ -502,9 +695,7 @@ async def test_mixed_questions_apply_type_calibration_once_and_sum_usage(
             {
                 "model": "decider-4b-q4-k-m",
                 "state": "evidence",
-                "questions": {
-                    "check": {"type": "noul", "criteria": {"true": 1}}
-                },
+                "questions": {"check": {"type": "noul", "criteria": {"true": 1}}},
             },
             "true",
         ),
@@ -600,6 +791,20 @@ async def test_unknown_model_and_configured_limits_fail_before_backend_work(
                 },
             },
         )
+        too_many_score_levels = await client.post(
+            "/v1/systemone",
+            headers={"Authorization": "Bearer caller-key"},
+            json={
+                "model": "decider-4b-q4-k-m",
+                "state": "evidence",
+                "questions": {
+                    "rating": {
+                        "type": "score",
+                        "criteria": ["low", "medium", "high"],
+                    }
+                },
+            },
+        )
 
     assert unknown.status_code == 422
     assert unknown.json()["detail"][0]["loc"] == ["body", "model"]
@@ -615,12 +820,28 @@ async def test_unknown_model_and_configured_limits_fail_before_backend_work(
         "first",
         "criteria",
     ]
+    assert too_many_score_levels.status_code == 422
+    assert too_many_score_levels.json()["detail"][0]["loc"] == [
+        "body",
+        "questions",
+        "rating",
+        "criteria",
+    ]
     assert backend_requests == []
 
 
 @pytest.mark.anyio
-async def test_score_is_validated_before_staged_rejection(
+@pytest.mark.parametrize(
+    "criteria",
+    [
+        pytest.param([], id="empty"),
+        pytest.param([None], id="null-level"),
+        pytest.param({"0": "only"}, id="map"),
+    ],
+)
+async def test_invalid_score_level_is_rejected_by_the_public_contract(
     metadata_directory: Path,
+    criteria: object,
 ) -> None:
     app = create_app(configured_settings(metadata_directory))
 
@@ -631,14 +852,100 @@ async def test_score_is_validated_before_staged_rejection(
             json={
                 "model": "decider-4b-q4-k-m",
                 "state": "evidence",
-                "questions": {
-                    "rating": {"type": "score", "criteria": [None]}
-                },
+                "questions": {"rating": {"type": "score", "criteria": criteria}},
             },
         )
 
     assert invalid_score.status_code == 422
     assert "criteria" in invalid_score.json()["detail"][0]["loc"]
+
+
+@pytest.mark.anyio
+async def test_score_level_count_above_the_pinned_limit_is_rejected(
+    metadata_directory: Path,
+) -> None:
+    backend_requests: list[httpx.Request] = []
+
+    def backend(request: httpx.Request) -> httpx.Response:
+        backend_requests.append(request)
+        return completion_response({1: 0.5, 2: 0.5})
+
+    app = create_app(
+        configured_settings(metadata_directory),
+        backend_transport=httpx.MockTransport(backend),
+    )
+
+    async with service_client(app) as client:
+        response = await client.post(
+            "/v1/systemone",
+            headers={"Authorization": "Bearer caller-key"},
+            json={
+                "model": "decider-4b-q4-k-m",
+                "state": "evidence",
+                "questions": {
+                    "rating": {
+                        "type": "score",
+                        "criteria": [f"level {index}" for index in range(11)],
+                    }
+                },
+            },
+        )
+
+    assert response.status_code == 422
+    assert response.json()["detail"][0] == {
+        "loc": ["body", "questions", "rating", "criteria"],
+        "msg": "option count exceeds configured capacity",
+        "type": "option_capacity",
+    }
+    assert backend_requests == []
+
+
+@pytest.mark.anyio
+async def test_later_isolated_score_prompt_overflow_names_its_question(
+    metadata_directory: Path,
+) -> None:
+    backend_requests: list[httpx.Request] = []
+
+    def backend(request: httpx.Request) -> httpx.Response:
+        backend_requests.append(request)
+        return completion_response({1: 0.5, 2: 0.5})
+
+    app = create_app(
+        configured_settings(metadata_directory, context_capacity=64),
+        backend_transport=httpx.MockTransport(backend),
+    )
+
+    async with (
+        app.router.lifespan_context(app),
+        service_client(app) as client,
+    ):
+        response = await client.post(
+            "/v1/systemone",
+            headers={"Authorization": "Bearer caller-key"},
+            json={
+                "model": "decider-4b-q4-k-m",
+                "state": "evidence",
+                "questions": {
+                    "severity": {
+                        "type": "score",
+                        "instructions": "Rate severity.",
+                        "criteria": [
+                            "low",
+                            "very " * 100,
+                            "high",
+                        ],
+                    }
+                },
+            },
+        )
+
+    assert response.status_code == 422
+    assert response.json()["detail"][0] == {
+        "loc": ["body", "questions", "severity"],
+        "msg": "complete rendered prompt exceeds configured backend context capacity",
+        "type": "context_capacity",
+    }
+    assert backend_requests == []
 
 
 @pytest.mark.anyio
@@ -696,9 +1003,7 @@ async def test_noul_accepts_optional_fields_and_preserves_structured_values(
 
     assert [response.status_code for response in responses] == [200] * 8
     assert all(
-        response.json()["answers"] == {
-            "check": {"type": "noul", "noul": 0.4}
-        }
+        response.json()["answers"] == {"check": {"type": "noul", "noul": 0.4}}
         for response in responses
     )
     tokenizer = PreTrainedTokenizerFast.from_pretrained(metadata_directory)
@@ -768,9 +1073,7 @@ async def test_structured_fields_and_omitted_or_null_instructions_are_accepted(
         ]
 
     assert [response.status_code for response in responses] == [200, 200, 200]
-    choices = [
-        response.json()["answers"]["result"]["choice"] for response in responses
-    ]
+    choices = [response.json()["answers"]["result"]["choice"] for response in responses]
     assert choices == [
         "first",
         "first",
@@ -988,16 +1291,12 @@ async def test_concurrent_noul_callers_keep_results_usage_and_credentials_isolat
 
     assert fast_response.status_code == 200
     assert slow_response.status_code == 200
-    assert fast_response.json()["answers"] == {
-        "check": {"type": "noul", "noul": 0.9}
-    }
+    assert fast_response.json()["answers"] == {"check": {"type": "noul", "noul": 0.9}}
     assert fast_response.json()["usage"] == {
         "input_tokens": 17,
         "output_tokens": 1,
     }
-    assert slow_response.json()["answers"] == {
-        "check": {"type": "noul", "noul": 0.2}
-    }
+    assert slow_response.json()["answers"] == {"check": {"type": "noul", "noul": 0.2}}
     assert slow_response.json()["usage"] == {
         "input_tokens": 13,
         "output_tokens": 1,
@@ -1011,6 +1310,100 @@ async def test_concurrent_noul_callers_keep_results_usage_and_credentials_isolat
         and "fast-key" not in request.content.decode()
         for request in backend_requests
     )
+
+
+@pytest.mark.anyio
+async def test_concurrent_score_callers_keep_rows_results_and_usage_isolated(
+    metadata_directory: Path,
+) -> None:
+    slow_rows_started = asyncio.Event()
+    release_slow_rows = asyncio.Event()
+    rows_by_credential: dict[str, int] = {}
+    backend_requests: list[httpx.Request] = []
+
+    async def backend(request: httpx.Request) -> httpx.Response:
+        backend_requests.append(request)
+        credential = request.headers["Authorization"]
+        row_number = rows_by_credential.get(credential, 0)
+        rows_by_credential[credential] = row_number + 1
+        if credential == "Bearer slow-key":
+            if rows_by_credential[credential] == 2:
+                slow_rows_started.set()
+            await release_slow_rows.wait()
+            fit_probability = [0.8, 0.2][row_number]
+            input_tokens = 13 + row_number
+        else:
+            fit_probability = [0.1, 0.9][row_number]
+            input_tokens = 17 + row_number
+        return completion_response(
+            {1: 1.0 - fit_probability, 2: fit_probability},
+            input_tokens=input_tokens,
+        )
+
+    app = create_app(
+        configured_settings(metadata_directory, backend_slots=4),
+        backend_transport=httpx.MockTransport(backend),
+    )
+    payload = {
+        "model": "decider-4b-q4-k-m",
+        "state": "evidence",
+        "questions": {
+            "severity": {
+                "type": "score",
+                "instructions": "Rate severity.",
+                "criteria": ["low", "high"],
+            }
+        },
+    }
+
+    async with (
+        app.router.lifespan_context(app),
+        service_client(app) as client,
+    ):
+        slow_task = asyncio.create_task(
+            client.post(
+                "/v1/systemone",
+                headers={"Authorization": "Bearer slow-key"},
+                json=payload,
+            )
+        )
+        await asyncio.wait_for(slow_rows_started.wait(), timeout=2)
+        fast_response = await asyncio.wait_for(
+            client.post(
+                "/v1/systemone",
+                headers={"Authorization": "Bearer fast-key"},
+                json=payload,
+            ),
+            timeout=2,
+        )
+        release_slow_rows.set()
+        slow_response = await asyncio.wait_for(slow_task, timeout=2)
+
+    assert fast_response.status_code == 200
+    assert slow_response.status_code == 200
+    assert fast_response.json()["answers"]["severity"] == {
+        "type": "score",
+        "score": 0.9,
+        "confidence": 0.8,
+        "legend": {"0": "low", "1": "high"},
+        "probabilities": {"0": 0.1, "1": 0.9},
+    }
+    assert fast_response.json()["usage"] == {
+        "input_tokens": 35,
+        "output_tokens": 2,
+    }
+    assert slow_response.json()["answers"]["severity"] == {
+        "type": "score",
+        "score": 0.2,
+        "confidence": 0.6,
+        "legend": {"0": "low", "1": "high"},
+        "probabilities": {"0": 0.8, "1": 0.2},
+    }
+    assert slow_response.json()["usage"] == {
+        "input_tokens": 27,
+        "output_tokens": 2,
+    }
+    assert rows_by_credential == {"Bearer slow-key": 2, "Bearer fast-key": 2}
 
 
 @pytest.mark.anyio
@@ -1109,12 +1502,75 @@ async def test_question_is_unchanged_when_independent_questions_are_reordered(
     assert reordered.status_code == 200
     prompts = [json.loads(request.content)["prompt"] for request in backend_requests]
     assert prompts[0] == prompts[2] == prompts[3]
-    assert first.json()["answers"][target_name] == second.json()["answers"][
-        target_name
-    ]
-    assert first.json()["answers"][target_name] == reordered.json()["answers"][
-        target_name
-    ]
+    assert first.json()["answers"][target_name] == second.json()["answers"][target_name]
+    assert (
+        first.json()["answers"][target_name] == reordered.json()["answers"][target_name]
+    )
+
+
+@pytest.mark.anyio
+async def test_score_is_unchanged_when_a_choice_is_added_or_reordered(
+    metadata_directory: Path,
+) -> None:
+    backend_requests: list[httpx.Request] = []
+
+    def backend(request: httpx.Request) -> httpx.Response:
+        backend_requests.append(request)
+        return completion_response({1: 0.3, 2: 0.7})
+
+    app = create_app(
+        configured_settings(metadata_directory),
+        backend_transport=httpx.MockTransport(backend),
+    )
+    score = {
+        "type": "score",
+        "instructions": "Rate severity.",
+        "criteria": ["low", "high"],
+    }
+    choice = {
+        "type": "choice",
+        "instructions": "Choose owner.",
+        "criteria": {"support": None, "sales": None},
+    }
+
+    async with (
+        app.router.lifespan_context(app),
+        service_client(app) as client,
+    ):
+        first = await client.post(
+            "/v1/systemone",
+            headers={"Authorization": "Bearer caller-key"},
+            json={
+                "model": "decider-4b-q4-k-m",
+                "state": "same evidence",
+                "questions": {"severity": score},
+            },
+        )
+        added = await client.post(
+            "/v1/systemone",
+            headers={"Authorization": "Bearer caller-key"},
+            json={
+                "model": "decider-4b-q4-k-m",
+                "state": "same evidence",
+                "questions": {"owner": choice, "severity": score},
+            },
+        )
+        reordered = await client.post(
+            "/v1/systemone",
+            headers={"Authorization": "Bearer caller-key"},
+            json={
+                "model": "decider-4b-q4-k-m",
+                "state": "same evidence",
+                "questions": {"severity": score, "owner": choice},
+            },
+        )
+
+    assert first.status_code == added.status_code == reordered.status_code == 200
+    first_answer = first.json()["answers"]["severity"]
+    assert added.json()["answers"]["severity"] == first_answer
+    assert reordered.json()["answers"]["severity"] == first_answer
+    prompts = [json.loads(request.content)["prompt"] for request in backend_requests]
+    assert prompts[0:2] == prompts[3:5] == prompts[5:7]
 
 
 @pytest.mark.anyio

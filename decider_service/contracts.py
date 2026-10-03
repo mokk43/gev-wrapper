@@ -68,8 +68,18 @@ class NoulAnswer(BaseModel):
     noul: float = Field(ge=0.0, le=1.0)
 
 
+class ScoreAnswer(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["score"]
+    score: float
+    confidence: float
+    legend: dict[str, StructuredValue]
+    probabilities: dict[str, float]
+
+
 Answer = Annotated[
-    ChoiceAnswer | NoulAnswer,
+    ChoiceAnswer | NoulAnswer | ScoreAnswer,
     Field(discriminator="type"),
 ]
 

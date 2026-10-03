@@ -7,6 +7,7 @@ from datetime import date
 from typing import Annotated
 
 import httpx
+from decider.systemone import MAX_LEVELS  # type: ignore[import-untyped]
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
@@ -209,16 +210,15 @@ def create_app(
                 "too_many_questions",
             )
         for name, question in request.questions.items():
-            if question.type == "score":
-                raise _field_validation_error(
-                    ("questions", name, "type"),
-                    "question type is not implemented yet",
-                    "unsupported_question_type",
-                )
-            if (
-                question.type == "choice"
-                and len(question.criteria) > settings.max_options
-            ):
+            if question.type == "choice":
+                option_count = len(question.criteria)
+                maximum_options = settings.max_options
+            elif question.type == "score":
+                option_count = len(question.criteria)
+                maximum_options = min(settings.max_options, MAX_LEVELS)
+            else:
+                continue
+            if option_count > maximum_options:
                 raise _field_validation_error(
                     ("questions", name, "criteria"),
                     "option count exceeds configured capacity",

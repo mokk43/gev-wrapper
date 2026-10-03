@@ -1868,6 +1868,49 @@ async def test_exhausted_admission_rejects_without_backend_work(
 
 
 @pytest.mark.anyio
+async def test_empty_preparation_for_evaluable_question_returns_a_sanitized_502(
+    metadata_directory: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = configured_settings(metadata_directory)
+    runtime = DecisionRuntime(settings)
+    monkeypatch.setattr(
+        runtime._decider,
+        "_system_one_items",
+        lambda *_args, **_kwargs: ({}, [], []),
+    )
+
+    def backend(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("empty preparation must fail before backend work")
+
+    app = create_app(
+        settings,
+        backend_transport=httpx.MockTransport(backend),
+    )
+
+    async with (
+        app.router.lifespan_context(app),
+        service_client(app) as client,
+    ):
+        app.state.decision_runtime = runtime
+        payload = choice_request_payload()
+        payload["questions"]["rating"] = {
+            "type": "score",
+            "criteria": ["only level"],
+        }
+        response = await client.post(
+            "/v1/systemone",
+            headers={"Authorization": "Bearer caller-key"},
+            json=payload,
+        )
+
+    assert response.status_code == 502
+    assert response.json() == {
+        "detail": "Backend response did not satisfy the inference contract."
+    }
+
+
+@pytest.mark.anyio
 async def test_invalid_preparation_shape_returns_a_sanitized_502(
     metadata_directory: Path,
 ) -> None:

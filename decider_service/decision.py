@@ -211,6 +211,10 @@ class DecisionRuntime:
                     str(exc),
                     "value_error",
                 ) from exc
+            if not items:
+                raise BackendContractError(
+                    "Pinned Decider preparation omitted evaluable questions"
+                )
         else:
             rendered, answer_index, items = {}, [], []
 

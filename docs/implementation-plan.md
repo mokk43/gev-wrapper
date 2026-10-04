@@ -139,9 +139,11 @@ The accepted service design owns technical requirements. The ordered work packag
 - The user supplied local development backend access and amended authentication
   to caller-key forwarding on 2026-10-03, then corrected the local port on
   2026-10-04. The accepted design records those inputs. Direct checks against
-  the corrected endpoint are recorded in the verification report; the observed
-  probability field and cache counter are incompatible with the accepted
-  startup contract. Immutable GGUF provenance, matching metadata, configured
-  public identity/release date, and a compatible build remain unresolved. Real
+  the corrected endpoint are recorded in the verification report. They
+  confirmed llama.cpp's native `completion_probabilities` response and
+  distinguished slot-resident `tokens_cached` from reused work reported by
+  `timings.cache_n`; the service contract and adapter now use those semantics.
+  Immutable GGUF provenance, matching metadata, configured public
+  identity/release date, and a traceable build remain unresolved. Real
   deployment backend addresses are still operator inputs.
 - No application or live-backend tests have run for this document. Planning verification is limited to document consistency, links, and formatting.

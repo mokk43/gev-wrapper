@@ -1590,7 +1590,9 @@ async def test_request_body_limit_returns_a_field_oriented_error(
     "backend_body",
     [
         {
-            "completion_probabilities": [{"top_logprobs": [{"id": 1, "logprob": -0.1}]}],
+            "completion_probabilities": [
+                {"top_logprobs": [{"id": 1, "logprob": -0.1}]}
+            ],
             "tokens_evaluated": 10,
             "tokens_predicted": 1,
         },
@@ -1713,19 +1715,22 @@ async def test_malformed_coverage_attempts_are_not_retried(
             {1: 0.4} if incomplete else {1: 0.4, 2: 0.6},
             excluded_token_ids=(2,) if incomplete else (),
         ).json()
+        top_logprobs = body["completion_probabilities"][0]["top_logprobs"]
         if malformation == "missing_counter_on_incomplete_coverage":
             del body["tokens_cached"]
         elif malformation == "wrong_token_id":
-            body["completion_probabilities"][0]["top_logprobs"][-1]["id"] = 99_999
+            top_logprobs[-1]["id"] = 99_999
         elif malformation == "multiple_final_slots":
-            body["completion_probabilities"].append(body["completion_probabilities"][0])
+            body["completion_probabilities"].append(
+                body["completion_probabilities"][0]
+            )
         elif malformation == "nonfinite_probability":
-            body["completion_probabilities"][0]["top_logprobs"][0]["logprob"] = float("nan")
+            top_logprobs[0]["logprob"] = float("nan")
         elif malformation == "positive_log_probability":
-            body["completion_probabilities"][0]["top_logprobs"][0]["logprob"] = 1.0
+            top_logprobs[0]["logprob"] = 1.0
         else:
-            body["completion_probabilities"][0]["top_logprobs"][0]["logprob"] = 0.0
-            body["completion_probabilities"][0]["top_logprobs"][1]["logprob"] = 0.0
+            top_logprobs[0]["logprob"] = 0.0
+            top_logprobs[1]["logprob"] = 0.0
         return httpx.Response(
             200,
             content=json.dumps(body, allow_nan=True),

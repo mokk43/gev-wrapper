@@ -72,7 +72,11 @@ Reuse upstream prompt and assembly logic where practical and pin any private int
 
 Preserve the existing raw-token `/completion` approach: one prediction, `temperature=-1`, pre-sampling probabilities, neutral penalties, disabled sampling filters, and non-streaming responses. Set `min_keep` equal to the requested `n_probs` coverage so the selected llama.cpp sampler must retain at least that many candidates; validate the returned coverage rather than assuming the request was honored. Start with prompt caching disabled, matching the supplied engine; changing caching later requires equivalence checks.
 
-The expected response contains `probs[0].top_logprobs`, with token IDs and log probabilities. Ignore generated text as a source of decision answers. Relative log probabilities can stand in for logits because the shared full-vocabulary normalization term cancels when softmax is applied over the requested options.
+The expected native llama.cpp response contains
+`completion_probabilities[0].top_logprobs`, with token IDs and log
+probabilities. Ignore generated text as a source of decision answers. Relative
+log probabilities can stand in for logits because the shared full-vocabulary
+normalization term cancels when softmax is applied over the requested options.
 
 Start coverage at 256 tokens. If required option tokens are absent, double the requested coverage for each retry and clamp the final attempt to the readiness-verified maximum. Use full-vocabulary coverage only when that maximum equals the verified vocabulary size. Every response must contain exactly the requested number of unique, in-vocabulary token probabilities at the single final slot. Log probabilities must be finite and nonpositive; returned probability mass may not exceed one by more than `1e-6`, and full-vocabulary mass must sum to one within the same absolute tolerance. Retry under the same admission limits and whole-request deadline. Never assign fabricated probability mass to absent options or return a distribution normalized over only the options that happened to appear.
 
@@ -82,7 +86,17 @@ The maximum coverage and vocabulary discovery method must be verified against th
 
 Report actual llama.cpp input and output token work across all rows and coverage retries attributable to the successful request. Repeated state processing counts repeatedly. Map verified backend counters into `usage.input_tokens` and `usage.output_tokens`; do not assume a field named `tokens_evaluated` has the intended accounting semantics without checking the pinned server version and caching behavior.
 
-Use one documented interpretation of backend counters and ensure accounting remains isolated across concurrent requests. A malformed or missing usage counter is a backend-contract error, not a reason to invent zero usage. Because every request disables prompt caching, reject nonzero `tokens_cached` during startup and runtime. Preparation-only results require no backend token work; normal remote inference requests generate one scoring token per evaluation attempt.
+Use one documented interpretation of backend counters and ensure accounting
+remains isolated across concurrent requests. A malformed or missing usage
+counter is a backend-contract error, not a reason to invent zero usage. For the
+selected native llama.cpp response, `tokens_cached` is the prompt length held
+in the slot after evaluation, not the number of tokens reused. With prompt
+caching disabled, require `timings.cache_n == 0`,
+`timings.prompt_n == tokens_evaluated == tokens_cached`, and
+`timings.predicted_n == tokens_predicted == 1`. Report `tokens_evaluated` and
+`tokens_predicted` as request usage. Preparation-only results require no
+backend token work; normal remote inference requests generate one scoring token
+per evaluation attempt.
 
 This intentionally differs from inherited Decider accounting, which reports logical shared input tokens and zero output tokens. See [ADR 0001](adr/0001-report-model-identity-and-backend-work.md).
 
@@ -112,15 +126,14 @@ development fixture on 2026-10-03 and corrected its port on 2026-10-04:
 - Native completion endpoint: `http://127.0.0.1:5080/completion`, serving decider-4b.
 - Local test API key: `llama5080`. Explicit local test clients send it as `Authorization: Bearer llama5080`; bounded startup probes may use it through operator configuration.
 
-These are user-provided test inputs. Direct observations and incompatibilities
-from 2026-10-04 are recorded in the [verification record](verification.md); they
-do not establish complete deployment compatibility. Keep the test key in
+These are user-provided test inputs. Direct observations from 2026-10-04 are
+recorded in the [verification record](verification.md); they do not establish
+complete deployment compatibility. Keep the test key in
 explicit local configuration and test invocations, not a hardcoded production
 credential or runtime fallback. The remaining required deployment information
 includes immutable GGUF provenance, matching metadata, public model identity
-and release date, aliases, and a backend build satisfying the probability and
-cache-counter contract. A real deployment still needs its own configured
-backend address.
+and release date, aliases, and a traceable backend build. A real deployment
+still needs its own configured backend address.
 
 Also configure backend concurrency, admission capacity, request limits, and an operator startup probe credential when backend authentication requires one. Their numerical values and variable names are implementation/deployment choices, not settled measurements. Expected traffic, typical question counts, and a measured latency target have not been supplied; the 60-second deadline is a guardrail, not a performance claim.
 

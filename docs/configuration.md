@@ -134,11 +134,12 @@ Application lifespan completes only after all checks pass. The gate:
   counters. Runtime requests likewise set `min_keep` to their requested
   coverage.
 
-For disabled prompt caching, the supported counter interpretation is
-`tokens_evaluated == submitted raw prompt token count`,
-`tokens_predicted == 1`, and `tokens_cached == 0` for the startup fixture.
-Runtime responses also reject missing or nonzero `tokens_cached`; usage sums
-the request-local input/output counters across rows. A
+For disabled prompt caching, the supported native llama.cpp counter
+interpretation is `timings.cache_n == 0` and
+`timings.prompt_n == tokens_evaluated == tokens_cached == submitted raw prompt
+token count`; `timings.predicted_n == tokens_predicted == 1` for the startup
+fixture. Runtime responses apply the same cross-checks; usage sums the
+request-local `tokens_evaluated` and `tokens_predicted` counters across rows. A
 selected build that does not expose the documented `/v1/models`, `/props`,
 `/detokenize`, `/tokenize`, and `/completion` shapes is unsupported and fails
 startup.
@@ -153,7 +154,7 @@ produces `256`, `512`, then `600`. The final attempt is full-vocabulary only
 when that verified maximum equals the verified backend vocabulary size.
 
 Every attempt requests matching `n_probs` and `min_keep` values. The response
-must contain exactly one final-slot `probs` element and exactly the requested
+must contain exactly one final-slot `completion_probabilities` element and exactly the requested
 number of `top_logprobs` entries. Each entry must have a unique integer token ID
 within the verified vocabulary and a finite, nonpositive numeric log
 probability. Per the accepted service design, returned probability mass may not
@@ -170,7 +171,7 @@ from every attempt, including attempts whose valid coverage omitted required
 option IDs. These runtime guarantees are covered by controlled fixtures; no
 live compatibility claim follows from them. The dated
 [verification record](verification.md) reports the local-backend availability
-attempt separately.
+and native-response checks separately.
 
 The documented local backend and key are test inputs, not defaults. Both public
 operations require one syntactically valid TypeSafe bearer credential. Model

@@ -18,9 +18,10 @@
 
 Controlled HTTP and official SDK verification completed on 2026-10-04. The local
 backend at `127.0.0.1:5080` was reachable and enforced authentication, but its
-probability field and cache counter were incompatible with the accepted startup
-contract. No separate caller key, issued TypeSafe key, trusted Decider baseline,
-or workload fixture was available. The
+native probability and counter shapes exposed two stale assumptions in the
+service contract and adapter; both now follow the observed llama.cpp semantics.
+No separate caller key, issued TypeSafe key, trusted Decider baseline, or
+workload fixture was available. The
 exact unverified deployment and performance checks are recorded in
 [`docs/verification.md`](../../../docs/verification.md); no live compatibility,
 quantization-equivalence, or latency claim is made.

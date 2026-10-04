@@ -221,7 +221,10 @@ async def test_startup_rejects_backend_quantization_mismatch(
 @pytest.mark.parametrize(
     ("body", "message"),
     [
-        ({"completion_probabilities": "invalid"}, "returned malformed probability data"),
+        (
+            {"completion_probabilities": "invalid"},
+            "returned malformed probability data",
+        ),
         (
             {
                 "completion_probabilities": [

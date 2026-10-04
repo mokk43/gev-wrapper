@@ -59,8 +59,7 @@ side of an in-flight request does not prove the backend stopped inference.
 
 The launch, public catalog check, and process-signal shutdown commands above
 were not run against a selected deployment on 2026-10-04 because required
-metadata, artifact provenance, and a separate caller key were unavailable, and
-the reachable backend failed the required probability/cache response contract.
+metadata, artifact provenance, and a separate caller key were unavailable.
 The controlled suite exercises
 the same application startup, authenticated public catalog, request
 cancellation, and shutdown behavior without claiming live compatibility.
@@ -79,7 +78,7 @@ added 1 package in 329ms
 
 The installed console entry points and environment parsing were also exercised.
 The validation command used a complete temporary controlled fixture, not the
-incompatible local deployment:
+incompletely configured local deployment:
 
 ```text
 $ uv run decider-service --help
@@ -116,7 +115,7 @@ All checks passed!
 $ uv run mypy
 mypy: No issues found
 $ uv run pytest -q
-157 passed
+160 passed
 ```
 
 The controlled suite uses an in-process service and deterministic backend
@@ -191,11 +190,11 @@ measured performance target.
 ## Actual live result and unavailable evidence
 
 The corrected backend address `http://127.0.0.1:5080` was reachable. Bounded
-direct checks with the supplied `llama5080` key observed:
+direct checks with the supplied local test key observed:
 
 ```text
 GET /health                                      200 {"status":"ok"}
-GET /v1/models with llama5080                    200
+GET /v1/models with the supplied key             200
 GET /v1/models with an invalid key               401 authentication_error
 POST /completion with an invalid key             401 authentication_error
 POST /tokenize for "A" with special tokens off    200 {"tokens":[32]}
@@ -209,32 +208,49 @@ do not prove the GGUF digest or metadata revision.
 
 A single-token completion requested `n_probs=256`, `min_keep=256`, one
 prediction, pre-sampling probabilities, and disabled prompt caching. The server
-returned HTTP 200 with one probability slot and 256 unique token IDs, but the
-field was named `completion_probabilities` rather than the required `probs`.
-It reported `tokens_evaluated=1`, `tokens_predicted=1`, and `tokens_cached=1`
-despite `cache_prompt=false`. The top-256 returned probability mass was
-`0.47338697444864825` and the response was not truncated.
+returned HTTP 200 with one `completion_probabilities` slot and 256 unique token
+IDs. The top-256 returned probability mass was `0.47338697444864825`; the
+response was not truncated.
 
-That response is incompatible with the accepted startup contract, which
-requires `probs[0].top_logprobs` and zero cached tokens. The service therefore
-cannot accept this selected backend without a deliberate contract or backend
-change. No public live smoke run was attempted. The following checks remain
-unavailable:
+Five requests varied and repeated one- and two-token raw prompts while keeping
+all other request fields fixed:
+
+```text
+prompt IDs  tokens_evaluated  tokens_cached  timings.prompt_n  timings.cache_n
+[32]        1                 1              1                 0
+[33]        1                 1              1                 0
+[32,33]     2                 2              2                 0
+[32]        1                 1              1                 0
+[32,33]     2                 2              2                 0
+```
+
+This shows that `tokens_cached` is the prompt length retained in the selected
+server slot, while `timings.cache_n` records reused prompt work. The current
+upstream llama.cpp implementation supports that interpretation: its native
+response emits
+[`completion_probabilities`](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/server-task.cpp),
+sets `tokens_cached` from the slot prompt length, and emits `cache_n` from the
+reused-prompt counter in
+[`server_slot_stats`](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/server-common.cpp).
+The service contract and adapter now validate those native semantics.
+
+No public live smoke run was attempted because the other required deployment
+inputs remain unavailable:
 
 - Complete tokenizer agreement and option-label token IDs; the single `"A"`
   tokenization probe is not sufficient evidence.
 - Maximum supported `n_probs`/`min_keep` coverage; only top-256 was exercised.
 - Immutable GGUF provenance, matching metadata revision, and a successful
   service startup compatibility gate.
-- The character format of an issued live TypeSafe key. `llama5080` is a supplied
-  local backend test key, not evidence about TypeSafe's issuer.
+- The character format of an issued live TypeSafe key. The supplied local
+  backend test key is not evidence about TypeSafe's issuer.
 - A separate backend-issued runtime caller key. The service cannot use its
   configured startup probe credential as a public caller fallback.
 - Numerical comparison with a trusted Decider baseline. No trusted baseline,
   fixed comparison corpus, matching artifact identity, or justified tolerance
   was supplied, so GGUF prediction and quantization equivalence are unverified.
 - Representative workload measurements for latency, queueing, concurrency, and
-  throughput. No workload fixture or compatible running service was supplied;
+  throughput. No workload fixture or fully configured running service was supplied;
   the 60-second request deadline must not be reported as observed latency.
 
 Controlled fixtures establish HTTP behavior only. They do not close any of the

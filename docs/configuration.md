@@ -146,10 +146,12 @@ after the full gate passes:
 - requires `GET /health` readiness, then compares `/v1/models` and `/props`
   model identity, path, build, quantization, vocabulary, training/effective
   context, and slot capacity with configuration;
-- compares every backend token ID with the local tokenizer through bounded
-  `/detokenize` chunks, then re-tokenizes that complete vocabulary-derived
-  corpus through `/tokenize` to check tokenization rules and all option-label
-  IDs;
+- compares every local token ID with the backend through bounded `/detokenize`
+  chunks, then re-tokenizes that complete vocabulary-derived corpus through
+  `/tokenize` to check tokenization rules and all option-label IDs; when the
+  backend vocabulary is larger, checks every trailing ID detokenizes to empty
+  with special-token rendering enabled, as required by the
+  [tokenizer compatibility contract](service-design.md#model-identity-and-artifacts);
 - proves that invalid bearer credentials are rejected by both `/v1/models` and
   `/completion`, while the operator probe credential is accepted;
 - sends one synthetic two-option Decider row with prompt caching disabled and

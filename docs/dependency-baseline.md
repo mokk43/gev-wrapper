@@ -58,6 +58,17 @@ requirements. Inspection found these differences in the pinned upstream code:
 - Upstream silently treats missing or unreadable `decider_config.json` as an
   empty configuration; the design requires incompatible metadata to fail
   startup.
+- The pinned Transformers Qwen2 loader ignores the metadata's Qwen3.5
+  `pretokenize_regex` and applies NFC normalization. The service recognizes
+  that explicitly declared native profile, applies its regex, and preserves
+  raw text to match llama.cpp's
+  [Qwen3.5 regex](https://github.com/ggml-org/llama.cpp/blob/master/src/llama-vocab.cpp)
+  and [raw BPE splitting](https://github.com/ggml-org/llama.cpp/blob/master/src/unicode.cpp).
+  The full tokenizer probe remains mandatory. llama.cpp's
+  [conversion](https://github.com/ggml-org/llama.cpp/blob/master/conversion/base.py)
+  can also append non-rendering vocabulary padding; startup verifies those
+  trailing IDs rather than requiring identical local and backend counts. See the
+  [tokenizer compatibility requirements](service-design.md#model-identity-and-artifacts).
 - Upstream prompt construction truncates State to a token limit; the design
   rejects complete prompts that exceed capacity.
 - Upstream accepts Choice arrays, Score maps, a `bool` type, and omitted Choice

@@ -26,7 +26,6 @@ from decider.systemone import (  # type: ignore[import-untyped]
     NOUL_WITHOUT_INSTRUCTIONS,
     assemble,
 )
-from transformers import AutoTokenizer
 
 from decider_service.config import Settings
 from decider_service.contracts import (
@@ -41,6 +40,7 @@ from decider_service.deployment import (
     load_local_runtime_config,
     validate_local_deployment,
 )
+from decider_service.tokenizer import load_backend_tokenizer
 
 
 class PublicInputError(Exception):
@@ -219,10 +219,7 @@ class DecisionRuntime:
             else validate_local_deployment(settings)
         )
 
-        tokenizer = AutoTokenizer.from_pretrained(
-            metadata_directory,
-            local_files_only=True,
-        )
+        tokenizer = load_backend_tokenizer(metadata_directory)
         decider = Decider.__new__(Decider)
         decider.schema_first = False
         decider.isolated_levels = bool(config.get("isolated_levels", False))

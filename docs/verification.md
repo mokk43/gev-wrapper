@@ -243,14 +243,58 @@ reused-prompt counter in
 [`server_slot_stats`](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/server-common.cpp).
 The service contract and adapter now validate those native semantics.
 
-No full-gate public live smoke run was attempted because the other required
-deployment inputs remain unavailable:
+The local metadata baseline was then downloaded from
+`Mapika/decider-4b-GGUF@b79f09d9ba7837f1b744295ea267b55d08e958ec`.
+Its configuration identifies `4b-v2.1`, released on `2026-09-24`, and its
+tokenizer contains 248,077 IDs. The 243 trailing backend IDs all detokenized to
+empty. Full local vocabulary comparisons exposed two loader differences:
+the declared Qwen3.5 regex was ignored, and NFC composed decomposed Unicode.
+With the native profile adaptation, every local ID passed decoding and
+vocabulary-derived re-encoding checks against the real backend.
 
-- Complete tokenizer agreement and option-label token IDs; the single `"A"`
-  tokenization probe is not sufficient evidence.
+A temporary harness exercised application lifespan and the public handlers
+through HTTPX's ASGI transport, with the actual backend at port 5080. It used
+manual identity-bypass mode, context 4,096, one backend slot, admission four,
+maximum coverage 256, the pinned metadata, and the supplied test key explicitly
+for startup and caller authentication. The representative mixed request was
+the Choice/Noul/Score outage example in the README. The harness reported:
+
+```text
+live manual startup gate passed
+GET /v1/models: 200
+POST /v1/systemone: 200
+mixed Choice/Noul/Score response passed; usage: {'input_tokens': 212, 'output_tokens': 5}
+service lifespan shutdown passed
+```
+
+This proves manual startup and handler-level inference against the real
+backend. It did not exercise the service's TCP listener or process-signal
+shutdown. The temporary diagnostic was removed after verification.
+
+Regression checks after these fixes completed:
+
+```text
+$ env -u DECIDER_BIND_HOST .venv/bin/pytest -q
+191 passed in 5.68s
+$ .venv/bin/ruff check .
+All checks passed!
+$ .venv/bin/mypy
+Success: no issues found in 20 source files
+$ env -u DECIDER_BIND_HOST npm test
+TypeSafe SDK 0.6.0 interoperability check passed: models, typed decisions, mixed request, bearer auth, and 401/403/422 errors
+```
+
+The controlled test commands cleared an inherited invalid `DECIDER_BIND_HOST`;
+the fixtures supply their own deployment settings. The SDK check required
+loopback socket permission and used its controlled backend.
+
+Normal identity-validating startup and a public TCP smoke check against the
+selected deployment remain unverified. The remaining gaps are:
+
 - Maximum supported `n_probs`/`min_keep` coverage; only top-256 was exercised.
 - Immutable GGUF provenance, matching metadata revision, and a successful
-  service startup compatibility gate.
+  identity-validating service startup gate. The downloaded metadata is pinned,
+  but its provenance relationship to the served GGUF has not been established.
 - The character format of an issued live TypeSafe key. The supplied local
   backend test key is not evidence about TypeSafe's issuer.
 - A separate backend-issued runtime caller key for normal operation. Manual
@@ -260,8 +304,8 @@ deployment inputs remain unavailable:
   fixed comparison corpus, matching artifact identity, or justified tolerance
   was supplied, so GGUF prediction and quantization equivalence are unverified.
 - Representative workload measurements for latency, queueing, concurrency, and
-  throughput. No workload fixture or fully configured running service was supplied;
-  the 60-second request deadline must not be reported as observed latency.
+  throughput. The single manual request is not a workload benchmark; the
+  60-second request deadline must not be reported as observed latency.
 
 Controlled fixtures establish HTTP behavior only. They do not close any of the
 live-deployment gaps above.

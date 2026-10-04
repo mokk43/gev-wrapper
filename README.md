@@ -26,8 +26,10 @@ and use sanitized bodies and operational logs. Loopback remains the default;
 an explicit network bind is accepted only behind the same mandatory startup
 authentication gate. An explicit loopback-only manual mode may skip deployment
 identity comparisons while retaining functional remote probes and runtime
-response validation. No live selected deployment has been verified, so the
-service is not production-ready.
+response validation. Manual startup and a mixed decision request passed against
+the supplied local backend after native Qwen3.5 tokenizer and vocabulary-padding
+compatibility fixes. Deployment identity and provenance remain unverified, so
+the service is not production-ready.
 
 ## Install and operate
 

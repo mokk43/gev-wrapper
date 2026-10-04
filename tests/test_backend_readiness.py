@@ -216,10 +216,16 @@ async def assert_startup_fails(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("backend_padding", [False, True])
 async def test_startup_rejects_backend_tokenizer_vocabulary_mismatch(
     metadata_directory: Path,
+    backend_padding: bool,
 ) -> None:
-    backend = ControlledBackend(metadata_directory)
+    backend = (
+        VocabularyPaddingBackend(metadata_directory)
+        if backend_padding
+        else ControlledBackend(metadata_directory)
+    )
     unprobed_label_id = backend.tokenizer.convert_tokens_to_ids("K")
 
     def mismatch(request: httpx.Request) -> httpx.Response:
@@ -242,11 +248,153 @@ async def test_startup_rejects_backend_tokenizer_vocabulary_mismatch(
     )
 
 
+class VocabularyPaddingBackend(ControlledBackend):
+    def __init__(
+        self,
+        metadata_directory: Path,
+        *,
+        padding_content: str = "",
+        padding_size: int = 137,
+    ) -> None:
+        super().__init__(metadata_directory)
+        self.padding_content = padding_content
+        self.vocabulary_size = len(self.tokenizer) + padding_size
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        if (
+            request.url.path == "/detokenize"
+            and request.headers.get("Authorization") == f"Bearer {PROBE_KEY}"
+        ):
+            self.requests.append(request)
+            tokens = json.loads(request.content)["tokens"]
+            content = self.tokenizer.decode(
+                [token for token in tokens if token < len(self.tokenizer)],
+                skip_special_tokens=False,
+                clean_up_tokenization_spaces=False,
+            )
+            content += self.padding_content * sum(
+                token >= len(self.tokenizer) for token in tokens
+            )
+            return httpx.Response(200, json={"content": content})
+        response = super().__call__(request)
+        if (
+            request.url.path == "/v1/models"
+            and request.headers.get("Authorization") == f"Bearer {PROBE_KEY}"
+        ):
+            body = response.json()
+            body["data"][0]["meta"]["n_vocab"] = self.vocabulary_size
+            return httpx.Response(200, json=body)
+        return response
+
+
 @pytest.mark.anyio
+@pytest.mark.parametrize("manual_mode", [False, True])
+@pytest.mark.parametrize("full_backend_coverage", [False, True])
+async def test_startup_accepts_only_verified_empty_backend_vocabulary_padding(
+    metadata_directory: Path,
+    manual_mode: bool,
+    full_backend_coverage: bool,
+) -> None:
+    backend = VocabularyPaddingBackend(metadata_directory)
+    local_vocabulary_size = len(backend.tokenizer)
+    maximum_coverage = (
+        backend.vocabulary_size if full_backend_coverage else local_vocabulary_size
+    )
+    app = create_app(
+        configured_settings(
+            metadata_directory,
+            skip_deployment_identity_validation=manual_mode,
+            startup_tokenizer_probe_chunk_size=128,
+            maximum_probability_coverage=maximum_coverage,
+        ),
+        backend_transport=backend.transport(),
+    )
+
+    async with app.router.lifespan_context(app):
+        capabilities = app.state.backend_capabilities
+
+    assert capabilities.vocabulary_size == backend.vocabulary_size
+    assert capabilities.maximum_probability_coverage == maximum_coverage
+    assert capabilities.full_vocabulary_probability_coverage is full_backend_coverage
+    detokenization_chunks = [
+        json.loads(request.content)["tokens"]
+        for request in backend.requests
+        if request.url.path == "/detokenize"
+    ]
+    assert all(len(chunk) <= 128 for chunk in detokenization_chunks)
+    assert sorted(token for chunk in detokenization_chunks for token in chunk) == list(
+        range(backend.vocabulary_size)
+    )
+    padding_chunks = [
+        chunk for chunk in detokenization_chunks if min(chunk) >= local_vocabulary_size
+    ]
+    assert [len(chunk) for chunk in padding_chunks] == [128, 9]
+    encoding_probes = [
+        request for request in backend.requests if request.url.path == "/tokenize"
+    ]
+    local_chunks = [
+        chunk for chunk in detokenization_chunks if max(chunk) < local_vocabulary_size
+    ]
+    assert len(encoding_probes) == len(local_chunks)
+    assert all(
+        json.loads(request.content)["parse_special"] for request in encoding_probes
+    )
+    probability_probe = next(
+        request
+        for request in backend.requests
+        if request.url.path == "/completion"
+        and request.headers.get("Authorization") == f"Bearer {PROBE_KEY}"
+    )
+    assert json.loads(probability_probe.content)["n_probs"] == maximum_coverage
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("manual_mode", [False, True])
+@pytest.mark.parametrize("padding_content", ["additional text", "<|control|>", "\x00"])
+async def test_startup_rejects_nonempty_backend_vocabulary_extensions(
+    metadata_directory: Path,
+    manual_mode: bool,
+    padding_content: str,
+) -> None:
+    backend = VocabularyPaddingBackend(
+        metadata_directory,
+        padding_content=padding_content,
+    )
+    await assert_startup_fails(
+        metadata_directory,
+        backend.transport(),
+        "trailing token IDs are not empty vocabulary padding",
+        skip_deployment_identity_validation=manual_mode,
+        startup_tokenizer_probe_chunk_size=128,
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("manual_mode", [False, True])
+async def test_startup_rejects_backend_vocabulary_smaller_than_local_metadata(
+    metadata_directory: Path,
+    manual_mode: bool,
+) -> None:
+    backend = VocabularyPaddingBackend(metadata_directory, padding_size=-1)
+    await assert_startup_fails(
+        metadata_directory,
+        backend.transport(),
+        "local tokenizer vocabulary size does not match the backend model",
+        skip_deployment_identity_validation=manual_mode,
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("backend_padding", [False, True])
 async def test_startup_rejects_backend_tokenization_rules_mismatch(
     metadata_directory: Path,
+    backend_padding: bool,
 ) -> None:
-    backend = ControlledBackend(metadata_directory)
+    backend = (
+        VocabularyPaddingBackend(metadata_directory)
+        if backend_padding
+        else ControlledBackend(metadata_directory)
+    )
 
     def mismatch(request: httpx.Request) -> httpx.Response:
         if (

@@ -302,7 +302,7 @@ async def validate_backend_deployment(
                     "configured context or Decider metadata cannot produce the "
                     "bounded startup fixture"
                 ) from None
-            if fixture.vocabulary_size != vocabulary_size:
+            if fixture.vocabulary_size > vocabulary_size:
                 raise StartupValidationError(
                     "local tokenizer vocabulary size does not match the backend model"
                 )
@@ -310,6 +310,38 @@ async def validate_backend_deployment(
                 raise StartupValidationError(
                     "maximum_probability_coverage exceeds the backend vocabulary size"
                 )
+            for first_token_id in range(
+                fixture.vocabulary_size,
+                vocabulary_size,
+                settings.startup_tokenizer_probe_chunk_size,
+            ):
+                padding_response = await _request(
+                    client,
+                    "POST",
+                    "/detokenize",
+                    deadline=deadline,
+                    bearer_token=probe_key,
+                    json={
+                        "tokens": list(
+                            range(
+                                first_token_id,
+                                min(
+                                    first_token_id
+                                    + settings.startup_tokenizer_probe_chunk_size,
+                                    vocabulary_size,
+                                ),
+                            )
+                        )
+                    },
+                )
+                _require_success(padding_response, "/detokenize")
+                padding_body = _json_object(padding_response, "/detokenize")
+                # Native /detokenize renders special tokens and concatenates
+                # pieces. Any visible extra token therefore makes this nonempty.
+                if padding_body.get("content") != "":
+                    raise StartupValidationError(
+                        "backend trailing token IDs are not empty vocabulary padding"
+                    )
             for (
                 token_ids,
                 expected_content,

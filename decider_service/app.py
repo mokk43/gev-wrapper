@@ -36,6 +36,7 @@ from decider_service.decision import (
     evaluate_request,
 )
 from decider_service.readiness import validate_backend_deployment
+from decider_service.timing import measure_stage, request_id_context
 
 
 class ModelMetadata(BaseModel):
@@ -129,8 +130,9 @@ def _safe_validation_message(kind: str) -> str:
 
 
 class RequestIdentifierMiddleware:
-    def __init__(self, app: ASGIApp) -> None:
+    def __init__(self, app: ASGIApp, timing_logging_enabled: bool = False) -> None:
         self._app = app
+        self._timing_logging_enabled = timing_logging_enabled
 
     async def __call__(
         self,
@@ -150,7 +152,31 @@ class RequestIdentifierMiddleware:
                 headers[_REQUEST_ID_HEADER] = request_id
             await send(message)
 
-        await self._app(scope, receive, send_with_request_id)
+        if not self._timing_logging_enabled or (
+            scope.get("method"), scope.get("path")
+        ) != ("POST", "/v1/systemone"):
+            await self._app(scope, receive, send_with_request_id)
+            return
+
+        context_token = request_id_context.set(request_id)
+        try:
+            with measure_stage("request_total", status_code=500) as timing:
+
+                async def send_with_timing(message: Message) -> None:
+                    if message["type"] == "http.response.start":
+                        status_code = message["status"]
+                        timing.details["status_code"] = status_code
+                        if status_code >= 400:
+                            timing.outcome = "error"
+                    await send_with_request_id(message)
+
+                try:
+                    await self._app(scope, receive, send_with_timing)
+                except asyncio.CancelledError:
+                    timing.details["status_code"] = 499
+                    raise
+        finally:
+            request_id_context.reset(context_token)
 
 
 class CallerAuthenticationMiddleware:
@@ -402,7 +428,10 @@ def create_app(
             else settings.operator_probe_api_key.get_secret_value()
         ),
     )
-    app.add_middleware(RequestIdentifierMiddleware)
+    app.add_middleware(
+        RequestIdentifierMiddleware,
+        timing_logging_enabled=settings.timing_logging_enabled,
+    )
 
     @app.exception_handler(RequestValidationError)
     async def field_oriented_validation_error(

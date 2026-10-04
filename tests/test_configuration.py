@@ -68,3 +68,56 @@ def test_exported_settings_override_dotenv(
     assert loaded.metadata_directory == dotenv_settings.metadata_directory
     assert loaded.model_release_date == dotenv_settings.model_release_date
     assert loaded.model_aliases == dotenv_settings.model_aliases
+
+
+def set_dotenv_timing_flag(value: str | None) -> None:
+    dotenv = Path(".env")
+    lines = [
+        line for line in dotenv.read_text(encoding="utf-8").splitlines()
+        if not line.startswith("DECIDER_TIMING_LOGGING_ENABLED=")
+    ]
+    if value is not None:
+        lines.append(f"DECIDER_TIMING_LOGGING_ENABLED={value}")
+    dotenv.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_timing_defaults_to_disabled_without_dotenv_setting(
+    dotenv_settings: Settings,
+) -> None:
+    set_dotenv_timing_flag(None)
+
+    loaded = load_settings()
+
+    assert loaded.timing_logging_enabled is False
+    assert loaded.metadata_directory == dotenv_settings.metadata_directory
+
+
+@pytest.mark.parametrize("value", ["true", "false"])
+def test_dotenv_controls_timing_without_exports(
+    dotenv_settings: Settings,
+    value: str,
+) -> None:
+    set_dotenv_timing_flag(value)
+
+    loaded = load_settings()
+
+    assert loaded.timing_logging_enabled is (value == "true")
+    assert loaded.model_name == dotenv_settings.model_name
+
+
+@pytest.mark.parametrize(
+    ("dotenv_value", "exported_value"), [("false", "true"), ("true", "false")]
+)
+def test_exported_timing_setting_overrides_dotenv(
+    dotenv_settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    dotenv_value: str,
+    exported_value: str,
+) -> None:
+    set_dotenv_timing_flag(dotenv_value)
+    monkeypatch.setenv("DECIDER_TIMING_LOGGING_ENABLED", exported_value)
+
+    loaded = load_settings()
+
+    assert loaded.timing_logging_enabled is (exported_value == "true")
+    assert loaded.metadata_directory == dotenv_settings.metadata_directory

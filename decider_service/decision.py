@@ -40,6 +40,7 @@ from decider_service.deployment import (
     load_local_runtime_config,
     validate_local_deployment,
 )
+from decider_service.timing import measure_stage
 from decider_service.tokenizer import load_backend_tokenizer
 
 
@@ -111,19 +112,24 @@ class DecisionCapacity:
 
     @asynccontextmanager
     async def admit(self) -> AsyncIterator[None]:
-        try:
-            self._admitted.put_nowait(None)
-        except asyncio.QueueFull as exc:
-            raise AdmissionCapacityError from exc
+        with measure_stage("admission"):
+            try:
+                self._admitted.put_nowait(None)
+            except asyncio.QueueFull as exc:
+                raise AdmissionCapacityError from exc
         try:
             yield
         finally:
             self._admitted.get_nowait()
 
     @asynccontextmanager
-    async def backend_slot(self) -> AsyncIterator[None]:
-        async with self._backend_slots:
+    async def backend_slot(self, **timing_details: int | float) -> AsyncIterator[None]:
+        with measure_stage("backend_slot_wait", **timing_details):
+            await self._backend_slots.acquire()
+        try:
             yield
+        finally:
+            self._backend_slots.release()
 
     async def run_offloaded(
         self,
@@ -551,13 +557,23 @@ async def _evaluate_row(
     bearer_token: str,
     coverage_policy: ProbabilityCoverage,
     deadline: float,
+    row_index: int,
 ) -> BackendRow:
     input_tokens = 0
     output_tokens = 0
-    for probability_coverage in _probability_coverage_schedule(
-        coverage_policy.initial,
-        coverage_policy.maximum,
+    for attempt, probability_coverage in enumerate(
+        _probability_coverage_schedule(
+            coverage_policy.initial,
+            coverage_policy.maximum,
+        ),
+        start=1,
     ):
+        timing_details = {
+            "row_index": row_index,
+            "attempt": attempt,
+            "n_probs": probability_coverage,
+            "prompt_tokens": len(row.token_ids),
+        }
         payload = completion_payload(row, probability_coverage)
         response = await _request_backend(
             client,
@@ -567,25 +583,37 @@ async def _evaluate_row(
             bearer_token=bearer_token,
             deadline=deadline,
             json=payload,
+            timing_details=timing_details,
         )
-        try:
-            body = response.json()
-        except ValueError as exc:
-            raise BackendContractError("backend returned malformed JSON") from exc
-        try:
-            result = parse_backend_row(
-                body,
-                label_token_ids[: row.option_count],
-                expected_input_tokens=len(row.token_ids),
-                expected_probability_coverage=probability_coverage,
-                vocabulary_size=coverage_policy.vocabulary_size,
-            )
-        except BackendMissingOptionCoverageError as exc:
-            input_tokens += exc.input_tokens
-            output_tokens += exc.output_tokens
-            if probability_coverage == coverage_policy.maximum:
-                raise
-            continue
+        with measure_stage("backend_response_validation", **timing_details) as timing:
+            try:
+                body = response.json()
+            except ValueError as exc:
+                raise BackendContractError("backend returned malformed JSON") from exc
+            if isinstance(body, dict) and isinstance(body.get("timings"), dict):
+                for name in ("prompt_ms", "predicted_ms"):
+                    value = body["timings"].get(name)
+                    if (
+                        not isinstance(value, bool)
+                        and isinstance(value, int | float)
+                        and 0 <= value <= sys.float_info.max
+                    ):
+                        timing.details[f"backend_{name}"] = value
+            try:
+                result = parse_backend_row(
+                    body,
+                    label_token_ids[: row.option_count],
+                    expected_input_tokens=len(row.token_ids),
+                    expected_probability_coverage=probability_coverage,
+                    vocabulary_size=coverage_policy.vocabulary_size,
+                )
+            except BackendMissingOptionCoverageError as exc:
+                input_tokens += exc.input_tokens
+                output_tokens += exc.output_tokens
+                if probability_coverage == coverage_policy.maximum:
+                    raise
+                timing.outcome = "retry"
+                continue
         return BackendRow(
             result.log_probabilities,
             input_tokens + result.input_tokens,
@@ -603,32 +631,41 @@ async def _request_backend(
     bearer_token: str,
     deadline: float,
     json: object | None = None,
+    timing_details: dict[str, int] | None = None,
 ) -> httpx.Response:
     try:
-        async with capacity.backend_slot():
-            remaining = deadline - asyncio.get_running_loop().time()
-            if remaining <= 0:
-                raise TimeoutError
-            response = await client.request(
-                method,
-                route,
-                headers={"Authorization": f"Bearer {bearer_token}"},
-                json=json,
-                timeout=remaining,
+        details = timing_details or {}
+        async with capacity.backend_slot(**details):
+            stage = (
+                "backend_completion"
+                if route == "/completion"
+                else "caller_authentication"
             )
+            with measure_stage(stage, **details) as timing:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise TimeoutError
+                response = await client.request(
+                    method,
+                    route,
+                    headers={"Authorization": f"Bearer {bearer_token}"},
+                    json=json,
+                    timeout=remaining,
+                )
+                timing.details["status_code"] = response.status_code
+                if response.status_code in {401, 403}:
+                    raise CallerAuthenticationError(response.status_code)
+                if response.status_code == 200:
+                    return response
+                if response.status_code in {408, 429} or response.status_code >= 500:
+                    raise BackendUnavailableError("backend rejected the request")
+                raise BackendContractError("backend rejected a supported request")
     except httpx.TimeoutException as exc:
         if asyncio.get_running_loop().time() >= deadline:
             raise TimeoutError from exc
         raise BackendUnavailableError("backend request timed out") from exc
     except httpx.RequestError as exc:
         raise BackendUnavailableError("backend request failed") from exc
-    if response.status_code in {401, 403}:
-        raise CallerAuthenticationError(response.status_code)
-    if response.status_code == 200:
-        return response
-    if response.status_code in {408, 429} or response.status_code >= 500:
-        raise BackendUnavailableError("backend rejected the request")
-    raise BackendContractError("backend rejected a supported request")
 
 
 async def authenticate_caller(
@@ -761,7 +798,9 @@ async def evaluate_request(
     probability_coverage: ProbabilityCoverage,
     deadline: float,
 ) -> DecisionResult:
-    prepared = await capacity.run_offloaded(lambda: runtime.prepare(request))
+    with measure_stage("preparation", question_count=len(request.questions)) as timing:
+        prepared = await capacity.run_offloaded(lambda: runtime.prepare(request))
+        timing.details["row_count"] = len(prepared.rows)
     if not prepared.rows:
         await authenticate_caller(
             client,
@@ -770,23 +809,26 @@ async def evaluate_request(
             deadline,
         )
         return DecisionResult(prepared.prepared_answers.copy(), 0, 0)
-    rows = await asyncio.gather(
-        *(
-            _evaluate_row(
-                client,
-                capacity,
-                row,
-                prepared.label_token_ids,
-                bearer_token,
-                probability_coverage,
-                deadline,
+    with measure_stage("backend_evaluation", row_count=len(prepared.rows)):
+        rows = await asyncio.gather(
+            *(
+                _evaluate_row(
+                    client,
+                    capacity,
+                    row,
+                    prepared.label_token_ids,
+                    bearer_token,
+                    probability_coverage,
+                    deadline,
+                    row_index,
+                )
+                for row_index, row in enumerate(prepared.rows)
             )
-            for row in prepared.rows
         )
-    )
-    answers = await capacity.run_offloaded(
-        lambda: _calibrate_and_assemble(prepared, rows)
-    )
+    with measure_stage("answer_assembly"):
+        answers = await capacity.run_offloaded(
+            lambda: _calibrate_and_assemble(prepared, rows)
+        )
     return DecisionResult(
         answers=answers,
         input_tokens=sum(row.input_tokens for row in rows),

@@ -50,6 +50,7 @@ loopback manual mode described below. All other required inputs remain required.
 | `DECIDER_MODEL_ALIASES` | `[]` | JSON array of deliberately enabled compatibility aliases. No alias, including `jev-latest`, is implicit. |
 | `DECIDER_BIND_HOST` | `127.0.0.1` | Listen address. Set a non-loopback address only for intentional network exposure. Every service start still requires the backend to enforce bearer credentials on model discovery and inference before traffic is accepted. |
 | `DECIDER_BIND_PORT` | `8000` | Listen port. |
+| `DECIDER_TIMING_LOGGING_ENABLED` | `false` | Enable request-stage timing logs at INFO. Restart the service after changing this value. |
 | `DECIDER_REQUEST_DEADLINE_SECONDS` | `60` | Whole-request deadline in seconds across admission, offloaded preparation, backend-slot waiting, evaluation, and assembly. Each backend transport timeout is limited to the remaining request budget. |
 | `DECIDER_INITIAL_PROBABILITY_COVERAGE` | `256` | Compatibility input accepted only as `256`; each backend row always starts recovery at 256. Missing required option token IDs trigger the bounded schedule below. |
 | `DECIDER_STARTUP_PROBE_ATTEMPTS` | `3` | Maximum readiness attempts against `GET /health`. |
@@ -227,6 +228,52 @@ admission, and deadline failures use fixed bodies. Every public response carries
 `x-typesafe-request-id`. Operational failure logs contain that identifier,
 method, path, status, and a fixed category, never request bodies, State, prompts,
 credentials, upstream bodies, or exception text.
+
+### Request timing
+
+Timing logs default to disabled. Set `DECIDER_TIMING_LOGGING_ENABLED=true` in
+`.env` to enable them, or `false` to disable them, then restart the service.
+Exported environment values override `.env`. When enabled, decision requests
+emit `request_timing` records at INFO on the `decider_service` logger. The
+`decider-service` command configures this logger on stderr; custom ASGI launchers
+must configure the logger at INFO with a handler. The switch controls only
+timing records; operational failure logs and response request identifiers remain
+available.
+Use the response's `x-typesafe-request-id` to find all records for a request.
+Each record includes `stage`, monotonic wall-clock `duration_ms`, and `outcome`
+(`success`, `retry`, `error`, or `cancelled`). The stages are:
+
+- `request_total`: time from the request middleware through response sending,
+  including body reading, authentication, validation, and serialization. Includes
+  `status_code`; cancellation uses diagnostic status 499 without sending a new
+  HTTP response. Early rejections still produce this record.
+- `admission`: the immediate admission-capacity check; admission currently
+  rejects overload rather than queueing requests.
+- `preparation`: rendering, tokenization, and row planning, including waiting
+  for a preparation worker. Includes `question_count` and, on success, `row_count`.
+- `backend_evaluation`: wall time for all concurrent rows and coverage retries.
+- `backend_slot_wait`: waiting for an available service backend slot.
+- `backend_completion`: each llama.cpp `/completion` HTTP call, including
+  connection setup, backend queueing/inference, and response-body transfer;
+  excludes service backend-slot waiting and JSON parsing.
+- `backend_response_validation`: JSON parsing, probability coverage and usage
+  validation. Missing option coverage produces `outcome=retry` when another
+  coverage attempt remains. Optional finite, nonnegative llama.cpp
+  `timings.prompt_ms` and `timings.predicted_ms` appear as `backend_prompt_ms`
+  and `backend_predicted_ms`; malformed optional values are ignored.
+- `answer_assembly`: calibration and typed-answer assembly, including waiting
+  for an assembly worker.
+- `caller_authentication`: the backend catalog HTTP call for preparation-only
+  decisions, which do not require completion or assembly.
+
+Per-row records include zero-based `row_index`, one-based `attempt`, requested
+`n_probs`, and `prompt_tokens`. Concurrent row durations overlap; compare
+`backend_evaluation` with `request_total` instead of summing every stage. Backend
+prompt/prediction metrics describe server-reported work, while the HTTP duration
+also includes transport and other server overhead. Cancelled preparation or
+assembly timings measure how long the request waited, not the final duration of
+threads that continue running. Timings contain no State, question names,
+criterion labels, prompt IDs, credentials, response bodies, or exception text.
 
 Creating the application establishes one shared, lifecycle-managed backend HTTP
 client. Backend evaluations and admitted requests are bounded per process by

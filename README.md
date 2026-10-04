@@ -155,6 +155,15 @@ rejected at the public boundary and cannot serve as runtime authentication
 fallback, except as an explicit caller credential in the loopback-only manual
 identity-bypass mode.
 
+Set `DECIDER_TIMING_LOGGING_ENABLED=true` in `.env` and restart the service to
+log milliseconds for preparation, backend-slot waiting,
+each llama.cpp call and coverage retry, response validation, assembly, and total
+request time. Timing logs default to disabled. The `decider-service` command
+prints enabled timing INFO records to stderr.
+Match `request_id` to the response's `x-typesafe-request-id`; see the
+[timing field definitions](docs/configuration.md#request-timing) to distinguish
+concurrent row timings from total elapsed time.
+
 ## References
 
 - [TypeSafe HTTP OpenAPI](https://api.typesafe.ai/openapi.json)

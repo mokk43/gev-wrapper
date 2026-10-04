@@ -73,6 +73,7 @@ class Settings(BaseSettings):
     startup_probe_timeout_seconds: PositiveFloat = 30.0
     startup_tokenizer_probe_chunk_size: int = Field(default=4096, ge=1, le=8192)
     skip_deployment_identity_validation: bool = False
+    timing_logging_enabled: bool = False
 
     @field_validator("model_aliases", mode="before")
     @classmethod

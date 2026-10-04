@@ -111,9 +111,11 @@ def completion_response(
     *,
     input_tokens: int = 11,
     output_tokens: int = 1,
+    cached_tokens: int = 0,
     coverage: int = 256,
+    excluded_token_ids: tuple[int, ...] = (),
 ) -> httpx.Response:
-    covered_token_ids = set(probabilities)
+    covered_token_ids = set(probabilities) | set(excluded_token_ids)
     filler_token_ids = (
         token_id
         for token_id in range(coverage + len(covered_token_ids))
@@ -136,7 +138,7 @@ def completion_response(
                     "top_logprobs": top_logprobs
                 }
             ],
-            "tokens_cached": 0,
+            "tokens_cached": cached_tokens,
             "tokens_evaluated": input_tokens,
             "tokens_predicted": output_tokens,
             "truncated": False,

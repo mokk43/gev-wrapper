@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import math
 import string
 import threading
 from pathlib import Path
@@ -20,11 +19,12 @@ from decider_service.app import create_app
 from decider_service.config import Settings
 from decider_service.decision import DecisionRuntime
 from tests.readiness_support import (
-    configured_settings as base_configured_settings,
-)
-from tests.readiness_support import (
+    completion_response,
     ready_backend_transport,
     write_test_manifest,
+)
+from tests.readiness_support import (
+    configured_settings as base_configured_settings,
 )
 
 
@@ -113,46 +113,6 @@ def multi_row_choice_request_payload() -> dict[str, Any]:
         "criteria": {"support": None, "sales": None},
     }
     return payload
-
-
-def completion_response(
-    probabilities: dict[int, float],
-    *,
-    input_tokens: int = 11,
-    output_tokens: int = 1,
-    cached_tokens: int = 0,
-    coverage: int = 256,
-    excluded_token_ids: tuple[int, ...] = (),
-) -> httpx.Response:
-    covered_token_ids = set(probabilities) | set(excluded_token_ids)
-    filler_token_ids = (
-        token_id
-        for token_id in range(coverage + len(covered_token_ids))
-        if token_id not in covered_token_ids
-    )
-    top_logprobs = [
-        {"id": token_id, "logprob": math.log(probability)}
-        for token_id, probability in probabilities.items()
-    ]
-    top_logprobs.extend(
-        {"id": next(filler_token_ids), "logprob": -1000.0}
-        for _ in range(coverage - len(top_logprobs))
-    )
-    return httpx.Response(
-        200,
-        json={
-            "content": "generated text is ignored",
-            "probs": [
-                {
-                    "top_logprobs": top_logprobs
-                }
-            ],
-            "tokens_cached": cached_tokens,
-            "tokens_evaluated": input_tokens,
-            "tokens_predicted": output_tokens,
-            "truncated": False,
-        },
-    )
 
 
 @pytest.mark.anyio
@@ -1532,6 +1492,7 @@ async def test_malformed_backend_data_returns_a_sanitized_502(
         "wrong_token_id",
         "multiple_final_slots",
         "nonfinite_probability",
+        "positive_log_probability",
     ],
 )
 async def test_malformed_coverage_attempts_are_not_retried(
@@ -1554,8 +1515,10 @@ async def test_malformed_coverage_attempts_are_not_retried(
             body["probs"][0]["top_logprobs"][-1]["id"] = 99_999
         elif malformation == "multiple_final_slots":
             body["probs"].append(body["probs"][0])
-        else:
+        elif malformation == "nonfinite_probability":
             body["probs"][0]["top_logprobs"][0]["logprob"] = float("nan")
+        else:
+            body["probs"][0]["top_logprobs"][0]["logprob"] = 1.0
         return httpx.Response(
             200,
             content=json.dumps(body, allow_nan=True),

@@ -181,6 +181,13 @@ class DecisionResult:
 
 
 @dataclass(frozen=True)
+class ProbabilityCoverage:
+    initial: int
+    maximum: int
+    vocabulary_size: int
+
+
+@dataclass(frozen=True)
 class ReadinessFixture:
     vocabulary_size: int
     label_token_ids: tuple[int, ...]
@@ -457,6 +464,7 @@ def parse_backend_row(
             isinstance(log_probability, bool)
             or not isinstance(log_probability, int | float)
             or not math.isfinite(log_probability)
+            or log_probability > 0
         ):
             raise BackendProbabilityDataError(
                 "backend returned malformed probability data"
@@ -504,16 +512,14 @@ async def _evaluate_row(
     row: PreparedRow,
     label_token_ids: tuple[int, ...],
     bearer_token: str,
-    initial_probability_coverage: int,
-    maximum_probability_coverage: int,
-    vocabulary_size: int,
+    coverage_policy: ProbabilityCoverage,
     deadline: float,
 ) -> BackendRow:
     input_tokens = 0
     output_tokens = 0
     for probability_coverage in _probability_coverage_schedule(
-        initial_probability_coverage,
-        maximum_probability_coverage,
+        coverage_policy.initial,
+        coverage_policy.maximum,
     ):
         payload = completion_payload(row, probability_coverage)
         try:
@@ -547,12 +553,12 @@ async def _evaluate_row(
                 body,
                 label_token_ids[: row.option_count],
                 expected_probability_coverage=probability_coverage,
-                vocabulary_size=vocabulary_size,
+                vocabulary_size=coverage_policy.vocabulary_size,
             )
         except BackendMissingOptionCoverageError as exc:
             input_tokens += exc.input_tokens
             output_tokens += exc.output_tokens
-            if probability_coverage == maximum_probability_coverage:
+            if probability_coverage == coverage_policy.maximum:
                 raise
             continue
         return BackendRow(
@@ -674,9 +680,7 @@ async def evaluate_request(
     client: httpx.AsyncClient,
     capacity: DecisionCapacity,
     bearer_token: str,
-    initial_probability_coverage: int,
-    maximum_probability_coverage: int,
-    vocabulary_size: int,
+    probability_coverage: ProbabilityCoverage,
     deadline: float,
 ) -> DecisionResult:
     prepared = await capacity.run_offloaded(lambda: runtime.prepare(request))
@@ -690,9 +694,7 @@ async def evaluate_request(
                 row,
                 prepared.label_token_ids,
                 bearer_token,
-                initial_probability_coverage,
-                maximum_probability_coverage,
-                vocabulary_size,
+                probability_coverage,
                 deadline,
             )
             for row in prepared.rows

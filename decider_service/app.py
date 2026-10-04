@@ -25,6 +25,7 @@ from decider_service.decision import (
     DecisionCapacity,
     DecisionResult,
     DecisionRuntime,
+    ProbabilityCoverage,
     PublicInputError,
     evaluate_request,
 )
@@ -316,13 +317,11 @@ def create_app(
                     client=app.state.backend_client,
                     capacity=app.state.decision_capacity,
                     bearer_token=bearer_token,
-                    initial_probability_coverage=(
-                        settings.initial_probability_coverage
+                    probability_coverage=ProbabilityCoverage(
+                        initial=settings.initial_probability_coverage,
+                        maximum=capabilities.maximum_probability_coverage,
+                        vocabulary_size=capabilities.vocabulary_size,
                     ),
-                    maximum_probability_coverage=(
-                        capabilities.maximum_probability_coverage
-                    ),
-                    vocabulary_size=capabilities.vocabulary_size,
                     deadline=deadline,
                 )
 

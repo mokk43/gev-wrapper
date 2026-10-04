@@ -39,15 +39,21 @@ Install the locked environment:
 uv sync --python 3.12.5 --locked
 ```
 
-For verified operation, create the pinned `deployment-manifest.json` and export
-the complete environment described in the
-[configuration reference](docs/configuration.md). Validate the environment,
+For verified operation, create the pinned `deployment-manifest.json` and supply
+the complete configuration described in the
+[configuration reference](docs/configuration.md), using exported variables or
+a local `.env` file. Run from the project directory; the service automatically
+loads `.env`, with exported variables taking precedence. Validate configuration,
 then start exactly one service worker:
 
 ```shell
 uv run decider-service --validate-config
 uv run decider-service
 ```
+
+For local manual testing, start with [`.env.example`](.env.example); follow the
+[configuration guidance](docs/configuration.md) to set the backend key and
+matching metadata directory.
 
 `--validate-config` checks environment parsing only. Starting the application
 runs the bounded backend compatibility gate and fails startup with a sanitized,

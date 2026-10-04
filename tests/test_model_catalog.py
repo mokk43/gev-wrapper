@@ -267,6 +267,7 @@ async def test_environment_factory_serves_configured_aliases(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.chdir(tmp_path)
     write_test_metadata(tmp_path)
     environment = {
         "DECIDER_BACKEND_URL": "http://127.0.0.1:8080",

@@ -145,5 +145,5 @@ class Settings(BaseSettings):
 
 
 def load_settings() -> Settings:
-    # Required values come from BaseSettings' environment sources at runtime.
-    return Settings()  # type: ignore[call-arg]
+    # Exported environment values take precedence over the local .env file.
+    return Settings(_env_file=".env", _env_file_encoding="utf-8")  # type: ignore[call-arg]

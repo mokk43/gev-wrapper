@@ -1,9 +1,19 @@
 # Service configuration
 
-All service configuration uses `DECIDER_*` environment variables. Required
-operator inputs have no defaults because the running llama.cpp artifact and
-capacity have not been verified. Secret values must be supplied at runtime,
-not committed.
+All service configuration uses `DECIDER_*` values from the process environment
+or a UTF-8 `.env` file in the working directory. The console entry point and
+environment-based application factory load that file automatically; exported
+environment variables take precedence. Run from the project directory to use
+its `.env`. Use `NAME=value` entries, quote descriptions containing spaces,
+and use an explicit metadata directory path rather than shell `$PWD`
+expansion. Required operator inputs have no defaults because the running
+llama.cpp artifact and capacity have not been verified. Secret values must be
+supplied at runtime, not committed; the project's `.env` is ignored by Git.
+
+The [`.env.example`](../.env.example) template supplies loopback manual-test
+settings. Copy it to `.env` if that file does not exist, then replace the API-key
+placeholder and select the matching metadata directory. Its relative metadata
+path resolves from the working directory.
 
 The six deployment-identity values for backend build, model ID, model path,
 GGUF revision, GGUF quantization, and metadata revision are optional only in the

@@ -64,10 +64,10 @@ _LLAMA_FTYPE_ALIASES = {
 def _json_object(response: httpx.Response, route: str) -> dict[str, Any]:
     try:
         body = response.json()
-    except ValueError as exc:
+    except ValueError:
         raise StartupValidationError(
             f"backend {route} returned malformed JSON during startup"
-        ) from exc
+        ) from None
     if not isinstance(body, dict):
         raise StartupValidationError(
             f"backend {route} returned an incompatible JSON shape during startup"
@@ -100,10 +100,10 @@ async def _request(
             json=json,
             timeout=remaining,
         )
-    except httpx.RequestError as exc:
+    except httpx.RequestError:
         raise StartupValidationError(
             f"backend {route} was unavailable during startup"
-        ) from exc
+        ) from None
 
 
 def _require_success(response: httpx.Response, route: str) -> None:
@@ -286,11 +286,11 @@ async def validate_backend_deployment(
 
             try:
                 fixture = runtime.readiness_fixture()
-            except (BackendContractError, PublicInputError) as exc:
+            except (BackendContractError, PublicInputError):
                 raise StartupValidationError(
                     "configured context or Decider metadata cannot produce the "
                     "bounded startup fixture"
-                ) from exc
+                ) from None
             if fixture.vocabulary_size != vocabulary_size:
                 raise StartupValidationError(
                     "local tokenizer vocabulary size does not match the backend model"
@@ -374,28 +374,28 @@ async def validate_backend_deployment(
                     ),
                     vocabulary_size=vocabulary_size,
                 )
-            except BackendProbabilityCoverageError as exc:
+            except BackendProbabilityCoverageError:
                 raise StartupValidationError(
                     "backend does not support configured maximum probability coverage"
-                ) from exc
-            except BackendProbabilityDataError as exc:
+                ) from None
+            except BackendProbabilityDataError:
                 raise StartupValidationError(
                     "backend /completion returned malformed probability data"
-                ) from exc
-            except BackendTokenIdentityError as exc:
+                ) from None
+            except BackendTokenIdentityError:
                 raise StartupValidationError(
                     "backend /completion returned incompatible token IDs"
-                ) from exc
-            except BackendCounterSemanticsError as exc:
+                ) from None
+            except BackendCounterSemanticsError:
                 raise StartupValidationError(
                     "backend counters do not represent uncached prompt and "
                     "generated work"
-                ) from exc
-            except BackendContractError as exc:
+                ) from None
+            except BackendContractError:
                 raise StartupValidationError(
                     "backend /completion probability or counter contract is "
                     "incompatible"
-                ) from exc
+                ) from None
             if (
                 parsed.input_tokens != len(fixture.row.token_ids)
                 or parsed.output_tokens != 1
@@ -404,10 +404,10 @@ async def validate_backend_deployment(
                     "backend counters do not represent uncached prompt and "
                     "generated work"
                 )
-    except TimeoutError as exc:
+    except TimeoutError:
         raise StartupValidationError(
             "backend startup checks exceeded startup_probe_timeout_seconds"
-        ) from exc
+        ) from None
 
     return BackendCapabilities(
         vocabulary_size=vocabulary_size,

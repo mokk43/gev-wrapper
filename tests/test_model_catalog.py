@@ -11,6 +11,8 @@ from decider_service.config import Settings
 from tests.readiness_support import (
     BACKEND_MODEL_ID,
     BACKEND_MODEL_PATH,
+    GGUF_REVISION,
+    METADATA_REVISION,
     PROBE_KEY,
     ready_backend_transport,
     write_test_metadata,
@@ -42,11 +44,27 @@ def configured_settings(
     return base_configured_settings(metadata_directory, **overrides)
 
 
+def authenticated_catalog_transport(
+    metadata_directory: Path,
+) -> httpx.MockTransport:
+    return ready_backend_transport(
+        metadata_directory,
+        lambda _request: httpx.Response(200, json={"data": []}),
+    )
+
+
 @pytest.mark.anyio
 async def test_catalog_lists_the_configured_decider_identity(tmp_path: Path) -> None:
-    app = create_app(configured_settings(tmp_path))
+    settings = configured_settings(tmp_path)
+    app = create_app(
+        settings,
+        backend_transport=authenticated_catalog_transport(tmp_path),
+    )
 
-    async with service_client(app) as client:
+    async with (
+        app.router.lifespan_context(app),
+        service_client(app) as client,
+    ):
         response = await client.get(
             "/v1/models",
             headers={"Authorization": "Bearer local-test-key"},
@@ -72,10 +90,19 @@ async def test_catalog_lists_only_explicit_compatibility_aliases(
         tmp_path,
         model_aliases=("legacy-decider", "jev-latest"),
     )
-    app = create_app(settings)
+    app = create_app(
+        settings,
+        backend_transport=authenticated_catalog_transport(tmp_path),
+    )
 
-    async with service_client(app) as client:
-        response = await client.get("/v1/models")
+    async with (
+        app.router.lifespan_context(app),
+        service_client(app) as client,
+    ):
+        response = await client.get(
+            "/v1/models",
+            headers={"Authorization": "Bearer local-test-key"},
+        )
 
     assert response.status_code == 200
     assert response.json()["models"] == [
@@ -146,12 +173,13 @@ def test_configuration_rejects_floating_artifact_revisions(
         configured_settings(tmp_path, **{field: floating_revision})
 
 
-def test_catalog_slice_rejects_non_loopback_binding(tmp_path: Path) -> None:
-    with pytest.raises(
-        ValidationError,
-        match="must be loopback until authenticated network exposure is implemented",
-    ):
-        configured_settings(tmp_path, bind_host="0.0.0.0")
+def test_binding_defaults_to_loopback(tmp_path: Path) -> None:
+    assert configured_settings(tmp_path).bind_host.is_loopback
+
+
+def test_configuration_allows_intentional_network_binding(tmp_path: Path) -> None:
+    settings = configured_settings(tmp_path, bind_host="0.0.0.0")
+    assert str(settings.bind_host) == "0.0.0.0"
 
 
 def test_configuration_requires_bounded_admission_for_backend_slots(
@@ -197,15 +225,16 @@ async def test_environment_factory_serves_configured_aliases(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    write_test_metadata(tmp_path)
     environment = {
         "DECIDER_BACKEND_URL": "http://127.0.0.1:8080",
         "DECIDER_BACKEND_BUILD": "llama.cpp-b1234",
         "DECIDER_BACKEND_MODEL_ID": BACKEND_MODEL_ID,
         "DECIDER_BACKEND_MODEL_PATH": BACKEND_MODEL_PATH,
-        "DECIDER_GGUF_REVISION": "b79f09d9ba7837f1b744295ea267b55d08e958ec",
+        "DECIDER_GGUF_REVISION": GGUF_REVISION,
         "DECIDER_GGUF_QUANTIZATION": "Q4_K_M",
         "DECIDER_METADATA_DIRECTORY": str(tmp_path),
-        "DECIDER_METADATA_REVISION": "b79f09d9ba7837f1b744295ea267b55d08e958ec",
+        "DECIDER_METADATA_REVISION": METADATA_REVISION,
         "DECIDER_MODEL_NAME": "decider-4b-q4-k-m",
         "DECIDER_MODEL_DESCRIPTION": "Configured Decider model.",
         "DECIDER_MODEL_RELEASE_DATE": "2025-07-04",
@@ -224,9 +253,17 @@ async def test_environment_factory_serves_configured_aliases(
 
     from decider_service.app import create_app_from_environment
 
-    app = create_app_from_environment()
-    async with service_client(app) as client:
-        response = await client.get("/v1/models")
+    app = create_app_from_environment(
+        backend_transport=authenticated_catalog_transport(tmp_path)
+    )
+    async with (
+        app.router.lifespan_context(app),
+        service_client(app) as client,
+    ):
+        response = await client.get(
+            "/v1/models",
+            headers={"Authorization": "Bearer local-test-key"},
+        )
 
     assert [model["name"] for model in response.json()["models"]] == [
         "decider-4b-q4-k-m",
@@ -240,12 +277,16 @@ async def test_public_catalog_check_validates_the_wire_response(
 ) -> None:
     from decider_service.catalog_check import fetch_catalog
 
-    app = create_app(configured_settings(tmp_path))
-    catalog = await fetch_catalog(
-        "http://test",
-        api_key="local-test-key",
-        transport=httpx.ASGITransport(app=app),
+    app = create_app(
+        configured_settings(tmp_path),
+        backend_transport=authenticated_catalog_transport(tmp_path),
     )
+    async with app.router.lifespan_context(app):
+        catalog = await fetch_catalog(
+            "http://test",
+            api_key="local-test-key",
+            transport=httpx.ASGITransport(app=app),
+        )
 
     assert catalog.models[0].name == "decider-4b-q4-k-m"
 

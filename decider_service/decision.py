@@ -340,12 +340,12 @@ class DecisionRuntime:
                     layout="state_first",
                     isolated=None,
                 )
-            except (AssertionError, TypeError, ValueError) as exc:
+            except (AssertionError, TypeError, ValueError):
                 raise PublicInputError(
                     ("questions",),
-                    str(exc),
+                    "question configuration could not be prepared",
                     "value_error",
-                ) from exc
+                ) from None
             if not items:
                 raise BackendContractError(
                     "Pinned Decider preparation omitted evaluable questions"
@@ -540,28 +540,15 @@ async def _evaluate_row(
         coverage_policy.maximum,
     ):
         payload = completion_payload(row, probability_coverage)
-        try:
-            async with capacity.backend_slot():
-                remaining = deadline - asyncio.get_running_loop().time()
-                if remaining <= 0:
-                    raise TimeoutError
-                response = await client.post(
-                    "/completion",
-                    headers={"Authorization": f"Bearer {bearer_token}"},
-                    json=payload,
-                    timeout=remaining,
-                )
-                if response.status_code in {401, 403}:
-                    raise CallerAuthenticationError(response.status_code)
-                response.raise_for_status()
-        except httpx.TimeoutException as exc:
-            if asyncio.get_running_loop().time() >= deadline:
-                raise TimeoutError from exc
-            raise BackendUnavailableError("backend request timed out") from exc
-        except httpx.RequestError as exc:
-            raise BackendUnavailableError("backend request failed") from exc
-        except httpx.HTTPStatusError as exc:
-            raise BackendUnavailableError("backend rejected the request") from exc
+        response = await _request_backend(
+            client,
+            capacity,
+            "POST",
+            "/completion",
+            bearer_token=bearer_token,
+            deadline=deadline,
+            json=payload,
+        )
         try:
             body = response.json()
         except ValueError as exc:
@@ -585,6 +572,59 @@ async def _evaluate_row(
             output_tokens + result.output_tokens,
         )
     raise AssertionError("probability coverage schedule must not be empty")
+
+
+async def _request_backend(
+    client: httpx.AsyncClient,
+    capacity: DecisionCapacity,
+    method: str,
+    route: str,
+    *,
+    bearer_token: str,
+    deadline: float,
+    json: object | None = None,
+) -> httpx.Response:
+    try:
+        async with capacity.backend_slot():
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise TimeoutError
+            response = await client.request(
+                method,
+                route,
+                headers={"Authorization": f"Bearer {bearer_token}"},
+                json=json,
+                timeout=remaining,
+            )
+    except httpx.TimeoutException as exc:
+        if asyncio.get_running_loop().time() >= deadline:
+            raise TimeoutError from exc
+        raise BackendUnavailableError("backend request timed out") from exc
+    except httpx.RequestError as exc:
+        raise BackendUnavailableError("backend request failed") from exc
+    if response.status_code in {401, 403}:
+        raise CallerAuthenticationError(response.status_code)
+    if response.status_code == 200:
+        return response
+    if response.status_code in {408, 429} or response.status_code >= 500:
+        raise BackendUnavailableError("backend rejected the request")
+    raise BackendContractError("backend rejected a supported request")
+
+
+async def authenticate_caller(
+    client: httpx.AsyncClient,
+    capacity: DecisionCapacity,
+    bearer_token: str,
+    deadline: float,
+) -> None:
+    await _request_backend(
+        client,
+        capacity,
+        "GET",
+        "/v1/models",
+        bearer_token=bearer_token,
+        deadline=deadline,
+    )
 
 
 def completion_payload(
@@ -703,6 +743,12 @@ async def evaluate_request(
 ) -> DecisionResult:
     prepared = await capacity.run_offloaded(lambda: runtime.prepare(request))
     if not prepared.rows:
+        await authenticate_caller(
+            client,
+            capacity,
+            bearer_token,
+            deadline,
+        )
         return DecisionResult(prepared.prepared_answers.copy(), 0, 0)
     rows = await asyncio.gather(
         *(

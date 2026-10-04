@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import string
 import threading
 from pathlib import Path
@@ -19,6 +20,7 @@ from decider_service.app import create_app
 from decider_service.config import Settings
 from decider_service.decision import DecisionRuntime
 from tests.readiness_support import (
+    assert_failure_was_logged,
     completion_response,
     ready_backend_transport,
     write_test_manifest,
@@ -571,14 +573,15 @@ async def test_score_is_evaluated_as_an_expected_level_through_public_http(
 
 
 @pytest.mark.anyio
-async def test_one_level_score_is_prepared_without_backend_work(
+async def test_one_level_score_authenticates_without_backend_inference(
     metadata_directory: Path,
 ) -> None:
     backend_requests: list[httpx.Request] = []
 
     def backend(request: httpx.Request) -> httpx.Response:
         backend_requests.append(request)
-        raise AssertionError("one-level Score must not require inference")
+        assert request.url.path == "/v1/models"
+        return httpx.Response(200, json={"data": []})
 
     app = create_app(
         configured_settings(metadata_directory),
@@ -618,7 +621,10 @@ async def test_one_level_score_is_prepared_without_backend_work(
         },
         "usage": {"input_tokens": 0, "output_tokens": 0},
     }
-    assert backend_requests == []
+    assert len(backend_requests) == 1
+    assert backend_requests[0].method == "GET"
+    assert backend_requests[0].headers["Authorization"] == "Bearer caller-key"
+    assert backend_requests[0].content == b""
 
 
 @pytest.mark.anyio
@@ -1486,7 +1492,10 @@ async def test_request_body_limit_returns_a_field_oriented_error(
 async def test_malformed_backend_data_returns_a_sanitized_502(
     metadata_directory: Path,
     backend_body: dict[str, Any],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.INFO, logger="decider_service")
+
     def backend(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
@@ -1524,6 +1533,9 @@ async def test_malformed_backend_data_returns_a_sanitized_502(
     }
     assert "secret-caller-key" not in response.text
     assert "private evidence" not in response.text
+    messages = assert_failure_was_logged(response, caplog, "backend_contract")
+    assert "secret-caller-key" not in messages
+    assert "private evidence" not in messages
 
 
 @pytest.mark.anyio
@@ -2325,7 +2337,9 @@ async def test_coverage_retries_use_the_global_backend_slot_limit(
 @pytest.mark.anyio
 async def test_exhausted_admission_rejects_without_backend_work(
     metadata_directory: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.INFO, logger="decider_service")
     slow_started = asyncio.Event()
     release_slow = asyncio.Event()
     backend_keys: list[str] = []
@@ -2380,12 +2394,16 @@ async def test_exhausted_admission_rejects_without_backend_work(
     assert rejected.json() == {"detail": "Decision service is at capacity."}
     assert after_release.status_code == 200
     assert backend_keys == ["Bearer slow-key", "Bearer next-key"]
+    messages = assert_failure_was_logged(rejected, caplog, "admission_capacity")
+    assert "rejected-key" not in messages
 
 
 @pytest.mark.anyio
 async def test_request_deadline_cancels_backend_work_and_releases_capacity(
     metadata_directory: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.INFO, logger="decider_service")
     slow_started = asyncio.Event()
     slow_cancelled = asyncio.Event()
     backend_keys: list[str] = []
@@ -2443,6 +2461,8 @@ async def test_request_deadline_cancels_backend_work_and_releases_capacity(
         for transport_timeout in transport_timeouts
         for timeout in transport_timeout.values()
     )
+    messages = assert_failure_was_logged(expired, caplog, "deadline")
+    assert "slow-key" not in messages
 
 
 @pytest.mark.anyio
@@ -2501,7 +2521,10 @@ async def test_deadline_includes_multiple_probability_coverage_attempts(
 @pytest.mark.anyio
 async def test_early_backend_transport_timeout_returns_503(
     metadata_directory: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.INFO, logger="decider_service")
+
     def backend(request: httpx.Request) -> httpx.Response:
         raise httpx.ReadTimeout("remaining request budget expired", request=request)
 
@@ -2523,6 +2546,9 @@ async def test_early_backend_transport_timeout_returns_503(
     assert response.status_code == 503
     assert response.json() == {"detail": "Decision backend unavailable."}
     assert "remaining request budget expired" not in response.text
+    messages = assert_failure_was_logged(response, caplog, "backend_unavailable")
+    assert "remaining request budget expired" not in messages
+    assert "caller-key" not in messages
 
 
 @pytest.mark.anyio

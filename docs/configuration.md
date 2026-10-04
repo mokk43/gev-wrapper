@@ -27,14 +27,14 @@ not committed.
 | `DECIDER_MAX_QUESTIONS` | Maximum questions per `/v1/systemone` request. |
 | `DECIDER_MAX_OPTIONS` | Maximum alternatives per question, from 2 through Decider's limit of 255. |
 | `DECIDER_MAXIMUM_PROBABILITY_COVERAGE` | Largest supported llama.cpp `n_probs` value. Startup probes this exact bound. Set it to the vocabulary size only when the selected build supports full-vocabulary probability output. |
-| `DECIDER_OPERATOR_PROBE_API_KEY` | Backend credential used only for bounded startup checks. It never becomes a runtime caller fallback. |
+| `DECIDER_OPERATOR_PROBE_API_KEY` | Backend credential used only for bounded startup checks. A public request presenting this value is rejected before backend work, and it never becomes a runtime caller fallback. |
 
 ## Defaults and optional inputs
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `DECIDER_MODEL_ALIASES` | `[]` | JSON array of deliberately enabled compatibility aliases. No alias, including `jev-latest`, is implicit. |
-| `DECIDER_BIND_HOST` | `127.0.0.1` | Listen address. This catalog slice rejects non-loopback addresses until authentication and exposure checks are implemented. |
+| `DECIDER_BIND_HOST` | `127.0.0.1` | Listen address. Set a non-loopback address only for intentional network exposure. Every service start still requires the backend to enforce bearer credentials on model discovery and inference before traffic is accepted. |
 | `DECIDER_BIND_PORT` | `8000` | Listen port. |
 | `DECIDER_REQUEST_DEADLINE_SECONDS` | `60` | Whole-request deadline in seconds across admission, offloaded preparation, backend-slot waiting, evaluation, and assembly. Each backend transport timeout is limited to the remaining request budget. |
 | `DECIDER_INITIAL_PROBABILITY_COVERAGE` | `256` | Compatibility input accepted only as `256`; each backend row always starts recovery at 256. Missing required option token IDs trigger the bounded schedule below. |
@@ -129,19 +129,31 @@ from every attempt, including attempts whose valid coverage omitted required
 option IDs. These runtime guarantees are covered by controlled fixtures; no
 live backend result is recorded in this repository.
 
-The documented local backend and key are test inputs, not defaults. Choice
-requests forward their caller's bearer credential on each backend row without
-mutating the shared client. Backend 401 and 403 responses are returned as
-sanitized public authentication failures with the same status. Final
-authentication behavior for the catalog and verification against the selected
-backend/client remain part of the operational-boundary slice; the service stays
-loopback-only. Creating the application establishes one shared,
-lifecycle-managed backend HTTP client. Backend evaluations and admitted
-requests are bounded per process by the configured capacities. Controlled
-fixtures prove gate behavior; they do not prove that any actual selected
-deployment is compatible. Each real service start performs the checks against
-its configured backend, and live results must be recorded during final
-operational verification.
+The documented local backend and key are test inputs, not defaults. Both public
+operations require one syntactically valid TypeSafe bearer credential. Model
+catalog requests forward it only to backend `GET /v1/models`; ordinary decision
+requests forward it on each backend row and coverage retry. Preparation-only
+decisions validate it through the backend catalog. Per-request headers do not
+mutate the shared client. Missing, malformed, rejected, and operator-probe
+credentials never fall back to the development or probe key.
+
+Backend 401 and 403 responses are returned as sanitized public authentication
+failures with the same status. The pinned client maps those statuses to its
+authentication and permission error types and reads textual `detail` fields.
+The pinned OpenAPI documents bearer security but no non-validation error schema,
+so the service makes no hosted-platform body-fidelity claim. Public validation
+failures contain only `loc`, `msg`, and `type`; backend-contract, unavailable,
+admission, and deadline failures use fixed bodies. Every public response carries
+`x-typesafe-request-id`. Operational failure logs contain that identifier,
+method, path, status, and a fixed category, never request bodies, State, prompts,
+credentials, upstream bodies, or exception text.
+
+Creating the application establishes one shared, lifecycle-managed backend HTTP
+client. Backend evaluations and admitted requests are bounded per process by
+the configured capacities. Controlled fixtures prove gate behavior; they do not
+prove that any actual selected deployment is compatible. Each real service
+start performs the checks against its configured backend, and live results must
+be recorded during final operational verification.
 
 Run one service worker. Each additional worker would create independent
 admission and backend-slot limits; multi-worker operation requires coordinated

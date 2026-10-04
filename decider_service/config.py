@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from datetime import date
-from ipaddress import IPv4Address, IPv6Address
+from ipaddress import IPv4Address
 from typing import Annotated
 
 from pydantic import (
@@ -87,17 +87,6 @@ class Settings(BaseSettings):
     def revision_is_immutable(cls, value: str) -> str:
         if IMMUTABLE_REVISION.fullmatch(value) is None:
             raise ValueError("must identify an immutable revision")
-        return value
-
-    @field_validator("bind_host")
-    @classmethod
-    def bind_is_loopback(
-        cls, value: IPv4Address | IPv6Address
-    ) -> IPv4Address | IPv6Address:
-        if not value.is_loopback:
-            raise ValueError(
-                "must be loopback until authenticated network exposure is implemented"
-            )
         return value
 
     @field_validator("model_release_date")

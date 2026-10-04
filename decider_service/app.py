@@ -1,18 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import re
+import uuid
 from collections.abc import AsyncIterator, Coroutine
 from contextlib import asynccontextmanager
 from datetime import date
-from typing import Annotated, Any, TypeVar
+from typing import Any, TypeVar, cast
 
 import httpx
 from decider.systemone import MAX_LEVELS  # type: ignore[import-untyped]
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
+from starlette.datastructures import MutableHeaders
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from decider_service.config import Settings, load_settings
@@ -27,6 +32,7 @@ from decider_service.decision import (
     DecisionRuntime,
     ProbabilityCoverage,
     PublicInputError,
+    authenticate_caller,
     evaluate_request,
 )
 from decider_service.readiness import validate_backend_deployment
@@ -54,6 +60,118 @@ _REQUEST_TOO_LARGE_DETAIL = [
     }
 ]
 _Result = TypeVar("_Result")
+_PUBLIC_OPERATIONS = {
+    ("GET", "/v1/models"),
+    ("POST", "/v1/systemone"),
+}
+_BEARER_CREDENTIAL = re.compile(rb"(?i:Bearer) ([A-Za-z0-9\-._~+/]+={0,})\Z")
+_REQUEST_ID_HEADER = "x-typesafe-request-id"
+_LOGGER = logging.getLogger("decider_service")
+
+
+def _scope_state(scope: Scope) -> dict[str, Any]:
+    state = scope.setdefault("state", {})
+    return cast(dict[str, Any], state)
+
+
+def _log_scope_failure(scope: Scope, status_code: int, category: str) -> None:
+    state = _scope_state(scope)
+    _LOGGER.info(
+        "request_failed request_id=%s method=%s path=%s status=%d category=%s",
+        state.get("request_id", "unavailable"),
+        scope.get("method", "unavailable"),
+        scope.get("path", "unavailable"),
+        status_code,
+        category,
+    )
+
+
+def _public_http_error(
+    request: Request,
+    status_code: int,
+    detail: str | list[dict[str, object]],
+    category: str,
+) -> HTTPException:
+    request.state.failure_category = category
+    return HTTPException(status_code=status_code, detail=detail)
+
+
+def _safe_validation_message(kind: str) -> str:
+    messages = {
+        "missing": "Field required",
+        "extra_forbidden": "Extra inputs are not permitted",
+        "dict_type": "Input should be a valid object",
+        "list_type": "Input should be a valid array",
+        "string_type": "Input should be a valid string",
+        "string_too_short": "String does not meet the minimum length",
+        "too_short": "Value does not meet the minimum length",
+        "union_tag_invalid": "Question type must be choice, noul, or score",
+        "union_tag_not_found": "Question type is required",
+    }
+    return messages.get(kind, "Invalid value")
+
+
+class RequestIdentifierMiddleware:
+    def __init__(self, app: ASGIApp) -> None:
+        self._app = app
+
+    async def __call__(
+        self,
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+    ) -> None:
+        if scope["type"] != "http":
+            await self._app(scope, receive, send)
+            return
+        request_id = uuid.uuid4().hex
+        _scope_state(scope)["request_id"] = request_id
+
+        async def send_with_request_id(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                headers[_REQUEST_ID_HEADER] = request_id
+            await send(message)
+
+        await self._app(scope, receive, send_with_request_id)
+
+
+class CallerAuthenticationMiddleware:
+    def __init__(self, app: ASGIApp, operator_probe_api_key: str) -> None:
+        self._app = app
+        self._operator_probe_api_key = operator_probe_api_key.encode("utf-8")
+
+    async def __call__(
+        self,
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+    ) -> None:
+        operation = (scope.get("method"), scope.get("path"))
+        if scope["type"] != "http" or operation not in _PUBLIC_OPERATIONS:
+            await self._app(scope, receive, send)
+            return
+        authorization_values = [
+            value
+            for name, value in scope.get("headers", [])
+            if name.lower() == b"authorization"
+        ]
+        match = (
+            _BEARER_CREDENTIAL.fullmatch(authorization_values[0])
+            if len(authorization_values) == 1
+            else None
+        )
+        if match is None or match.group(1) == self._operator_probe_api_key:
+            _log_scope_failure(scope, 401, "caller_authentication")
+            response = JSONResponse(
+                status_code=401,
+                content={"detail": "Bearer credential required."},
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+            await response(scope, receive, send)
+            return
+        _scope_state(scope)["bearer_token"] = match.group(1).decode("ascii")
+        await self._app(scope, receive, send)
 
 
 class ActiveRequests:
@@ -153,6 +271,7 @@ class RequestBodyLimitMiddleware:
             except ValueError:
                 declared_size = -1
             if declared_size > self._maximum_bytes:
+                _log_scope_failure(scope, 422, "request_too_large")
                 await _request_too_large_response()(scope, receive, send)
                 return
 
@@ -228,23 +347,109 @@ def create_app(
         RequestBodyLimitMiddleware,
         maximum_bytes=settings.max_request_bytes,
     )
+    app.add_middleware(
+        CallerAuthenticationMiddleware,
+        operator_probe_api_key=settings.operator_probe_api_key.get_secret_value(),
+    )
+    app.add_middleware(RequestIdentifierMiddleware)
 
     @app.exception_handler(RequestValidationError)
     async def field_oriented_validation_error(
-        _request: Request,
+        request: Request,
         exc: RequestValidationError,
     ) -> JSONResponse:
-        errors = exc.errors()
-        for error in errors:
-            if error["type"] in {"union_tag_invalid", "union_tag_not_found"}:
-                error["loc"] = (*error["loc"], "type")
+        errors: list[dict[str, object]] = []
+        for error in exc.errors():
+            kind = str(error["type"])
+            location = tuple(error["loc"])
+            if kind in {"union_tag_invalid", "union_tag_not_found"}:
+                location = (*location, "type")
+            errors.append(
+                {
+                    "loc": location,
+                    "msg": _safe_validation_message(kind),
+                    "type": kind,
+                }
+            )
+        _log_scope_failure(request.scope, 422, "request_validation")
         return JSONResponse(
             status_code=422,
             content={"detail": jsonable_encoder(errors)},
         )
 
+    @app.exception_handler(StarletteHTTPException)
+    async def operational_http_error(
+        request: Request,
+        exc: StarletteHTTPException,
+    ) -> JSONResponse:
+        category = getattr(
+            request.state,
+            "failure_category",
+            f"http_{exc.status_code}",
+        )
+        _log_scope_failure(request.scope, exc.status_code, category)
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": jsonable_encoder(exc.detail)},
+            headers=exc.headers,
+        )
+
+    @app.exception_handler(Exception)
+    async def unexpected_service_error(
+        request: Request,
+        _exc: Exception,
+    ) -> JSONResponse:
+        _log_scope_failure(request.scope, 500, "unexpected_service_error")
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "Internal service error."},
+            headers={
+                _REQUEST_ID_HEADER: cast(
+                    str,
+                    request.state.request_id,
+                )
+            },
+        )
+
     @app.get("/v1/models", response_model=ModelMetadataList)
-    async def list_models() -> ModelMetadataList:
+    async def list_models(http_request: Request) -> ModelMetadataList:
+        deadline = asyncio.get_running_loop().time() + settings.request_deadline_seconds
+        try:
+            async with asyncio.timeout_at(deadline):
+                await authenticate_caller(
+                    app.state.backend_client,
+                    app.state.decision_capacity,
+                    cast(str, http_request.state.bearer_token),
+                    deadline,
+                )
+        except TimeoutError as exc:
+            raise _public_http_error(
+                http_request,
+                504,
+                "Model catalog request deadline expired.",
+                "deadline",
+            ) from exc
+        except BackendContractError as exc:
+            raise _public_http_error(
+                http_request,
+                502,
+                "Backend response did not satisfy the catalog contract.",
+                "backend_contract",
+            ) from exc
+        except BackendUnavailableError as exc:
+            raise _public_http_error(
+                http_request,
+                503,
+                "Decision backend unavailable.",
+                "backend_unavailable",
+            ) from exc
+        except CallerAuthenticationError as exc:
+            raise _public_http_error(
+                http_request,
+                exc.status_code,
+                "Backend rejected caller credentials.",
+                "caller_authentication",
+            ) from exc
         release_date = settings.model_release_date
         return ModelMetadataList(
             models=[
@@ -271,13 +476,8 @@ def create_app(
     async def system_one(
         request: SystemOneRequest,
         http_request: Request,
-        authorization: Annotated[str | None, Header()] = None,
     ) -> SystemOneResponse:
-        if authorization is None or not authorization.startswith("Bearer "):
-            raise HTTPException(status_code=401, detail="Bearer credential required")
-        bearer_token = authorization.removeprefix("Bearer ")
-        if not bearer_token:
-            raise HTTPException(status_code=401, detail="Bearer credential required")
+        bearer_token = cast(str, http_request.state.bearer_token)
         if request.model not in (settings.model_name, *settings.model_aliases):
             raise _field_validation_error(
                 ("model",),
@@ -332,14 +532,18 @@ def create_app(
                     http_request,
                 )
         except TimeoutError as exc:
-            raise HTTPException(
-                status_code=504,
-                detail="Decision request deadline expired.",
+            raise _public_http_error(
+                http_request,
+                504,
+                "Decision request deadline expired.",
+                "deadline",
             ) from exc
         except AdmissionCapacityError as exc:
-            raise HTTPException(
-                status_code=503,
-                detail="Decision service is at capacity.",
+            raise _public_http_error(
+                http_request,
+                503,
+                "Decision service is at capacity.",
+                "admission_capacity",
             ) from exc
         except PublicInputError as exc:
             raise _field_validation_error(
@@ -348,19 +552,25 @@ def create_app(
                 exc.kind,
             ) from exc
         except BackendContractError as exc:
-            raise HTTPException(
-                status_code=502,
-                detail="Backend response did not satisfy the inference contract.",
+            raise _public_http_error(
+                http_request,
+                502,
+                "Backend response did not satisfy the inference contract.",
+                "backend_contract",
             ) from exc
         except BackendUnavailableError as exc:
-            raise HTTPException(
-                status_code=503,
-                detail="Decision backend unavailable.",
+            raise _public_http_error(
+                http_request,
+                503,
+                "Decision backend unavailable.",
+                "backend_unavailable",
             ) from exc
         except CallerAuthenticationError as exc:
-            raise HTTPException(
-                status_code=exc.status_code,
-                detail="Backend rejected caller credentials.",
+            raise _public_http_error(
+                http_request,
+                exc.status_code,
+                "Backend rejected caller credentials.",
+                "caller_authentication",
             ) from exc
         return SystemOneResponse(
             model=settings.model_name,
@@ -374,5 +584,8 @@ def create_app(
     return app
 
 
-def create_app_from_environment() -> FastAPI:
-    return create_app(load_settings())
+def create_app_from_environment(
+    *,
+    backend_transport: httpx.AsyncBaseTransport | None = None,
+) -> FastAPI:
+    return create_app(load_settings(), backend_transport=backend_transport)

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import pytest
 from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import PreTrainedTokenizerFast
 
@@ -104,6 +105,22 @@ def configured_settings(metadata_directory: Path, **overrides: object) -> Settin
     }
     values.update(overrides)
     return Settings.model_validate(values)
+
+
+def assert_failure_was_logged(
+    response: httpx.Response,
+    caplog: pytest.LogCaptureFixture,
+    category: str,
+) -> str:
+    request_id = response.headers["x-typesafe-request-id"]
+    messages = "\n".join(
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "decider_service"
+    )
+    assert request_id in messages
+    assert f"category={category}" in messages
+    return messages
 
 
 def completion_response(

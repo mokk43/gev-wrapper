@@ -17,9 +17,13 @@ preparation and assembly remain separately bounded until their worker threads
 finish. Startup blocks traffic until pinned local metadata and the selected
 llama.cpp deployment pass bounded artifact, build, tokenizer, context,
 probability, counter, and authentication checks. Missing option probabilities
-now trigger bounded coverage recovery. The final catalog authentication
-boundary remains a separate implementation slice. The service remains
-restricted to loopback and is not production-ready.
+now trigger bounded coverage recovery. Both public endpoints require caller
+bearer credentials and validate them through the configured backend without
+installing credentials on the shared client. Public failures carry request IDs
+and use sanitized bodies and operational logs. Loopback remains the default;
+an explicit network bind is accepted only behind the same mandatory startup
+authentication gate. No live selected deployment has been verified, so the
+service is not production-ready.
 
 ## Catalog setup
 
@@ -42,11 +46,12 @@ uv run decider-service
 runs the bounded backend compatibility gate and fails startup with a sanitized,
 actionable diagnostic when the deployment is unavailable or incompatible.
 
-Check the public wire response from another shell. Supply an API key explicitly
-when checking a future authenticated slice:
+Check the authenticated public wire response from another shell:
 
 ```shell
-uv run decider-service-check --base-url http://127.0.0.1:8000
+uv run decider-service-check \
+  --base-url http://127.0.0.1:8000 \
+  --api-key '<API_KEY>'
 ```
 
 The service is pinned to CPython 3.12.5 and `decider-ai==1.8.1`. It loads only
@@ -115,11 +120,16 @@ credential are recorded in the [service configuration requirements](docs/service
 No live result is recorded in this repository. Each service start verifies the
 configured deployment before accepting traffic. Decision requests require
 TypeSafe-format bearer credentials, forwarded to the configured backend per
-request and never installed on the shared client. Backend 401 and 403 responses
-become sanitized public authentication failures with the same status.
-Verification against the pinned TypeSafe client, plus authentication for the
-public model catalog, remains part of the operational-boundary slice. Startup
-probe credentials remain separate and cannot serve as runtime authentication
+request and never installed on the shared client. Model-catalog requests
+validate the caller credential through the backend catalog before returning
+the configured public metadata. Preparation-only decisions use the same catalog
+validation because they perform no inference call. Backend 401 and 403
+responses become sanitized public authentication failures with the same status,
+which the pinned client maps to its authentication and permission error types.
+Every public response includes `x-typesafe-request-id`; failure logs retain that
+identifier, status, and a fixed category without request bodies, State, prompts,
+credentials, upstream bodies, or exception text. Startup probe credentials are
+rejected at the public boundary and cannot serve as runtime authentication
 fallback.
 
 ## References

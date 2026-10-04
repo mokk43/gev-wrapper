@@ -197,6 +197,37 @@ async def test_catalog_forwards_only_the_callers_credential_to_the_backend(
 
 
 @pytest.mark.anyio
+async def test_catalog_accepts_the_complete_rfc_6750_b64token_alphabet(
+    metadata_directory: Path,
+) -> None:
+    credential = "AZaz09-._~+/=="
+    caller_requests: list[httpx.Request] = []
+
+    def backend(request: httpx.Request) -> httpx.Response:
+        caller_requests.append(request)
+        return httpx.Response(200, json={"data": []})
+
+    app = create_app(
+        configured_settings(metadata_directory),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
+    )
+
+    async with (
+        app.router.lifespan_context(app),
+        service_client(app) as client,
+    ):
+        response = await client.get(
+            "/v1/models",
+            headers={"Authorization": f"Bearer {credential}"},
+        )
+
+    assert response.status_code == 200
+    assert [request.headers["Authorization"] for request in caller_requests] == [
+        f"Bearer {credential}"
+    ]
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("backend_status", [401, 403])
 @pytest.mark.parametrize(
     ("path", "json"),
@@ -375,6 +406,7 @@ async def test_unexpected_runtime_exceptions_are_sanitized_and_logged(
         caplog,
         "unexpected_service_error",
     )
+    assert "exception_type=RuntimeError" in messages
     assert "secret-upstream-exception-marker" not in response.text + messages
     assert "secret-caller-key" not in response.text + messages
 

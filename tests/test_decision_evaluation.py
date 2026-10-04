@@ -2103,7 +2103,9 @@ async def test_oversized_content_length_is_rejected_before_reading_the_body(
 @pytest.mark.anyio
 async def test_chunked_oversized_body_stops_consuming_at_the_limit(
     metadata_directory: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.INFO, logger="decider_service")
     chunks = [b"123456", b"789012", b"unread-tail"]
     emitted_chunks: list[bytes] = []
 
@@ -2128,6 +2130,7 @@ async def test_chunked_oversized_body_stops_consuming_at_the_limit(
 
     assert response.status_code == 422
     assert emitted_chunks == chunks[:2]
+    assert_failure_was_logged(response, caplog, "request_too_large")
 
 
 @pytest.mark.anyio

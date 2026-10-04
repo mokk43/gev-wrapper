@@ -74,15 +74,32 @@ def _scope_state(scope: Scope) -> dict[str, Any]:
     return cast(dict[str, Any], state)
 
 
-def _log_scope_failure(scope: Scope, status_code: int, category: str) -> None:
+def _log_scope_failure(
+    scope: Scope,
+    status_code: int,
+    category: str,
+    *,
+    exception_type: str | None = None,
+) -> None:
     state = _scope_state(scope)
-    _LOGGER.info(
-        "request_failed request_id=%s method=%s path=%s status=%d category=%s",
+    fields = (
         state.get("request_id", "unavailable"),
         scope.get("method", "unavailable"),
         scope.get("path", "unavailable"),
         status_code,
         category,
+    )
+    if exception_type is None:
+        _LOGGER.info(
+            "request_failed request_id=%s method=%s path=%s status=%d category=%s",
+            *fields,
+        )
+        return
+    _LOGGER.error(
+        "request_failed request_id=%s method=%s path=%s status=%d category=%s "
+        "exception_type=%s",
+        *fields,
+        exception_type,
     )
 
 
@@ -283,6 +300,7 @@ class RequestBodyLimitMiddleware:
             if message["type"] == "http.request":
                 received_bytes += len(message.get("body", b""))
                 if received_bytes > self._maximum_bytes:
+                    _scope_state(scope)["failure_category"] = "request_too_large"
                     raise HTTPException(
                         status_code=422,
                         detail=_REQUEST_TOO_LARGE_DETAIL,
@@ -397,9 +415,14 @@ def create_app(
     @app.exception_handler(Exception)
     async def unexpected_service_error(
         request: Request,
-        _exc: Exception,
+        exc: Exception,
     ) -> JSONResponse:
-        _log_scope_failure(request.scope, 500, "unexpected_service_error")
+        _log_scope_failure(
+            request.scope,
+            500,
+            "unexpected_service_error",
+            exception_type=type(exc).__name__,
+        )
         return JSONResponse(
             status_code=500,
             content={"detail": "Internal service error."},

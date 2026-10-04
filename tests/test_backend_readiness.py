@@ -828,7 +828,7 @@ def test_configuration_requires_top_256_initial_probability_coverage(
     metadata_directory: Path,
 ) -> None:
     with pytest.raises(
-        ValueError,
+        ValidationError,
         match="initial_probability_coverage must be 256",
     ):
         configured_settings(

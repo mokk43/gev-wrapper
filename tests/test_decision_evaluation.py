@@ -121,17 +121,30 @@ def completion_response(
     input_tokens: int = 11,
     output_tokens: int = 1,
     cached_tokens: int = 0,
+    coverage: int = 256,
+    excluded_token_ids: tuple[int, ...] = (),
 ) -> httpx.Response:
+    covered_token_ids = set(probabilities) | set(excluded_token_ids)
+    filler_token_ids = (
+        token_id
+        for token_id in range(coverage + len(covered_token_ids))
+        if token_id not in covered_token_ids
+    )
+    top_logprobs = [
+        {"id": token_id, "logprob": math.log(probability)}
+        for token_id, probability in probabilities.items()
+    ]
+    top_logprobs.extend(
+        {"id": next(filler_token_ids), "logprob": -1000.0}
+        for _ in range(coverage - len(top_logprobs))
+    )
     return httpx.Response(
         200,
         json={
             "content": "generated text is ignored",
             "probs": [
                 {
-                    "top_logprobs": [
-                        {"id": token_id, "logprob": math.log(probability)}
-                        for token_id, probability in probabilities.items()
-                    ]
+                    "top_logprobs": top_logprobs
                 }
             ],
             "tokens_cached": cached_tokens,
@@ -218,6 +231,221 @@ async def test_choice_is_evaluated_through_the_public_http_boundary(
     assert payload["prompt"]
     assert all(isinstance(token_id, int) for token_id in payload["prompt"])
     assert "caller-key" not in backend_request.content.decode()
+
+
+@pytest.mark.anyio
+async def test_missing_option_probabilities_expand_coverage_and_include_retry_usage(
+    metadata_directory: Path,
+) -> None:
+    coverages: list[int] = []
+
+    def backend(request: httpx.Request) -> httpx.Response:
+        coverage = json.loads(request.content)["n_probs"]
+        coverages.append(coverage)
+        attempt = len(coverages)
+        probabilities = {1: 0.4, 2: 0.6} if coverage == 600 else {1: 0.9}
+        return completion_response(
+            probabilities,
+            input_tokens=attempt * 10,
+            coverage=coverage,
+            excluded_token_ids=() if coverage == 600 else (2,),
+        )
+
+    app = create_app(
+        configured_settings(
+            metadata_directory,
+            maximum_probability_coverage=600,
+        ),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
+    )
+
+    async with (
+        app.router.lifespan_context(app),
+        service_client(app) as client,
+    ):
+        response = await client.post(
+            "/v1/systemone",
+            headers={"Authorization": "Bearer caller-key"},
+            json=choice_request_payload(),
+        )
+
+    assert response.status_code == 200
+    assert response.json()["answers"]["priority"] == {
+        "type": "choice",
+        "choice": "routine",
+        "confidence": 0.2,
+        "probabilities": {"urgent": 0.4, "routine": 0.6},
+    }
+    assert response.json()["usage"] == {
+        "input_tokens": 60,
+        "output_tokens": 3,
+    }
+    assert coverages == [256, 512, 600]
+
+
+@pytest.mark.anyio
+async def test_runtime_rejects_probability_data_larger_than_requested_coverage(
+    metadata_directory: Path,
+) -> None:
+    backend_requests = 0
+
+    def backend(_request: httpx.Request) -> httpx.Response:
+        nonlocal backend_requests
+        backend_requests += 1
+        return httpx.Response(
+            200,
+            json={
+                "probs": [
+                    {
+                        "top_logprobs": [
+                            {"id": token_id, "logprob": -float(token_id + 1)}
+                            for token_id in range(257)
+                        ]
+                    }
+                ],
+                "tokens_cached": 0,
+                "tokens_evaluated": 11,
+                "tokens_predicted": 1,
+                "truncated": False,
+            },
+        )
+
+    app = create_app(
+        configured_settings(metadata_directory),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
+    )
+
+    async with (
+        app.router.lifespan_context(app),
+        service_client(app) as client,
+    ):
+        response = await client.post(
+            "/v1/systemone",
+            headers={"Authorization": "Bearer caller-key"},
+            json=choice_request_payload(),
+        )
+
+    assert response.status_code == 502
+    assert response.json() == {
+        "detail": "Backend response did not satisfy the inference contract."
+    }
+    assert backend_requests == 1
+
+
+@pytest.mark.anyio
+async def test_runtime_rejects_probability_data_smaller_than_requested_coverage(
+    metadata_directory: Path,
+) -> None:
+    def backend(_request: httpx.Request) -> httpx.Response:
+        return completion_response({1: 0.4, 2: 0.6}, coverage=2)
+
+    app = create_app(
+        configured_settings(metadata_directory),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
+    )
+
+    async with (
+        app.router.lifespan_context(app),
+        service_client(app) as client,
+    ):
+        response = await client.post(
+            "/v1/systemone",
+            headers={"Authorization": "Bearer caller-key"},
+            json=choice_request_payload(),
+        )
+
+    assert response.status_code == 502
+    assert response.json() == {
+        "detail": "Backend response did not satisfy the inference contract."
+    }
+
+
+@pytest.mark.anyio
+async def test_supported_full_vocabulary_coverage_recovers_missing_options(
+    metadata_directory: Path,
+) -> None:
+    vocabulary_size = len(PreTrainedTokenizerFast.from_pretrained(metadata_directory))
+    coverages: list[int] = []
+
+    def backend(request: httpx.Request) -> httpx.Response:
+        coverage = json.loads(request.content)["n_probs"]
+        coverages.append(coverage)
+        probabilities = (
+            {1: 0.25, 2: 0.75}
+            if coverage == vocabulary_size
+            else {1: 0.9}
+        )
+        return completion_response(
+            probabilities,
+            coverage=coverage,
+            excluded_token_ids=() if coverage == vocabulary_size else (2,),
+        )
+
+    app = create_app(
+        configured_settings(
+            metadata_directory,
+            maximum_probability_coverage=vocabulary_size,
+        ),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
+    )
+
+    async with (
+        app.router.lifespan_context(app),
+        service_client(app) as client,
+    ):
+        response = await client.post(
+            "/v1/systemone",
+            headers={"Authorization": "Bearer caller-key"},
+            json=choice_request_payload(),
+        )
+
+    assert response.status_code == 200
+    assert response.json()["answers"]["priority"]["probabilities"] == {
+        "urgent": 0.25,
+        "routine": 0.75,
+    }
+    assert coverages == [256, 512, vocabulary_size]
+
+
+@pytest.mark.anyio
+async def test_exhausted_probability_coverage_returns_no_partial_answers(
+    metadata_directory: Path,
+) -> None:
+    coverages: list[int] = []
+
+    def backend(request: httpx.Request) -> httpx.Response:
+        coverage = json.loads(request.content)["n_probs"]
+        coverages.append(coverage)
+        return completion_response(
+            {1: 0.9},
+            coverage=coverage,
+            excluded_token_ids=(2,),
+        )
+
+    app = create_app(
+        configured_settings(
+            metadata_directory,
+            maximum_probability_coverage=600,
+        ),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
+    )
+
+    async with (
+        app.router.lifespan_context(app),
+        service_client(app) as client,
+    ):
+        response = await client.post(
+            "/v1/systemone",
+            headers={"Authorization": "Bearer caller-key"},
+            json=choice_request_payload(),
+        )
+
+    assert response.status_code == 502
+    assert response.json() == {
+        "detail": "Backend response did not satisfy the inference contract."
+    }
+    assert "answers" not in response.json()
+    assert coverages == [256, 512, 600]
 
 
 @pytest.mark.anyio
@@ -1297,6 +1525,66 @@ async def test_malformed_backend_data_returns_a_sanitized_502(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    "malformation",
+    [
+        "missing_counter_on_incomplete_coverage",
+        "wrong_token_id",
+        "multiple_final_slots",
+        "nonfinite_probability",
+    ],
+)
+async def test_malformed_coverage_attempts_are_not_retried(
+    metadata_directory: Path,
+    malformation: str,
+) -> None:
+    backend_requests = 0
+
+    def backend(_request: httpx.Request) -> httpx.Response:
+        nonlocal backend_requests
+        backend_requests += 1
+        incomplete = malformation == "missing_counter_on_incomplete_coverage"
+        body = completion_response(
+            {1: 0.4} if incomplete else {1: 0.4, 2: 0.6},
+            excluded_token_ids=(2,) if incomplete else (),
+        ).json()
+        if malformation == "missing_counter_on_incomplete_coverage":
+            del body["tokens_cached"]
+        elif malformation == "wrong_token_id":
+            body["probs"][0]["top_logprobs"][-1]["id"] = 99_999
+        elif malformation == "multiple_final_slots":
+            body["probs"].append(body["probs"][0])
+        else:
+            body["probs"][0]["top_logprobs"][0]["logprob"] = float("nan")
+        return httpx.Response(
+            200,
+            content=json.dumps(body, allow_nan=True),
+            headers={"Content-Type": "application/json"},
+        )
+
+    app = create_app(
+        configured_settings(metadata_directory),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
+    )
+
+    async with (
+        app.router.lifespan_context(app),
+        service_client(app) as client,
+    ):
+        response = await client.post(
+            "/v1/systemone",
+            headers={"Authorization": "Bearer caller-key"},
+            json=choice_request_payload(),
+        )
+
+    assert response.status_code == 502
+    assert response.json() == {
+        "detail": "Backend response did not satisfy the inference contract."
+    }
+    assert backend_requests == 1
+
+
+@pytest.mark.anyio
 async def test_concurrent_noul_callers_keep_results_usage_and_credentials_isolated(
     metadata_directory: Path,
 ) -> None:
@@ -1371,6 +1659,87 @@ async def test_concurrent_noul_callers_keep_results_usage_and_credentials_isolat
         and "fast-key" not in request.content.decode()
         for request in backend_requests
     )
+
+
+@pytest.mark.anyio
+async def test_concurrent_coverage_retries_keep_results_usage_and_keys_isolated(
+    metadata_directory: Path,
+) -> None:
+    slow_started = asyncio.Event()
+    release_slow = asyncio.Event()
+    attempts: dict[str, list[int]] = {}
+
+    async def backend(request: httpx.Request) -> httpx.Response:
+        credential = request.headers["Authorization"]
+        coverage = json.loads(request.content)["n_probs"]
+        attempts.setdefault(credential, []).append(coverage)
+        if credential == "Bearer slow-key" and coverage == 256:
+            slow_started.set()
+            await release_slow.wait()
+        excluded_token_ids: tuple[int, ...]
+        if coverage == 256:
+            probabilities = {1: 0.9}
+            excluded_token_ids = (2,)
+        elif credential == "Bearer slow-key":
+            probabilities = {1: 0.8, 2: 0.2}
+            excluded_token_ids = ()
+        else:
+            probabilities = {1: 0.1, 2: 0.9}
+            excluded_token_ids = ()
+        input_tokens = 13 if credential == "Bearer slow-key" else 17
+        return completion_response(
+            probabilities,
+            input_tokens=input_tokens,
+            coverage=coverage,
+            excluded_token_ids=excluded_token_ids,
+        )
+
+    app = create_app(
+        configured_settings(metadata_directory),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
+    )
+
+    async with (
+        app.router.lifespan_context(app),
+        service_client(app) as client,
+    ):
+        slow_task = asyncio.create_task(
+            client.post(
+                "/v1/systemone",
+                headers={"Authorization": "Bearer slow-key"},
+                json=choice_request_payload(),
+            )
+        )
+        await asyncio.wait_for(slow_started.wait(), timeout=2)
+        fast_response = await client.post(
+            "/v1/systemone",
+            headers={"Authorization": "Bearer fast-key"},
+            json=choice_request_payload(),
+        )
+        release_slow.set()
+        slow_response = await slow_task
+
+    assert fast_response.status_code == slow_response.status_code == 200
+    assert fast_response.json()["answers"]["priority"]["probabilities"] == {
+        "urgent": 0.1,
+        "routine": 0.9,
+    }
+    assert slow_response.json()["answers"]["priority"]["probabilities"] == {
+        "urgent": 0.8,
+        "routine": 0.2,
+    }
+    assert fast_response.json()["usage"] == {
+        "input_tokens": 34,
+        "output_tokens": 2,
+    }
+    assert slow_response.json()["usage"] == {
+        "input_tokens": 26,
+        "output_tokens": 2,
+    }
+    assert attempts == {
+        "Bearer slow-key": [256, 512],
+        "Bearer fast-key": [256, 512],
+    }
 
 
 @pytest.mark.anyio
@@ -1879,6 +2248,72 @@ async def test_backend_slots_are_global_across_multi_row_callers(
 
 
 @pytest.mark.anyio
+async def test_coverage_retries_use_the_global_backend_slot_limit(
+    metadata_directory: Path,
+) -> None:
+    started: asyncio.Queue[tuple[str, int]] = asyncio.Queue()
+    release: asyncio.Queue[None] = asyncio.Queue()
+    active = 0
+    maximum_active = 0
+    attempts: dict[str, list[int]] = {}
+
+    async def backend(request: httpx.Request) -> httpx.Response:
+        nonlocal active, maximum_active
+        credential = request.headers["Authorization"]
+        coverage = json.loads(request.content)["n_probs"]
+        attempts.setdefault(credential, []).append(coverage)
+        active += 1
+        maximum_active = max(maximum_active, active)
+        await started.put((credential, coverage))
+        try:
+            await release.get()
+        finally:
+            active -= 1
+        probabilities = {1: 0.7, 2: 0.3} if coverage == 512 else {1: 0.9}
+        return completion_response(
+            probabilities,
+            coverage=coverage,
+            excluded_token_ids=() if coverage == 512 else (2,),
+        )
+
+    app = create_app(
+        configured_settings(
+            metadata_directory,
+            backend_slots=1,
+            admission_capacity=2,
+        ),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
+    )
+
+    async with (
+        app.router.lifespan_context(app),
+        service_client(app) as client,
+    ):
+        callers = [
+            asyncio.create_task(
+                client.post(
+                    "/v1/systemone",
+                    headers={"Authorization": f"Bearer caller-{caller}"},
+                    json=choice_request_payload(),
+                )
+            )
+            for caller in range(2)
+        ]
+        for _attempt in range(4):
+            await asyncio.wait_for(started.get(), timeout=2)
+            assert active == 1
+            release.put_nowait(None)
+        responses = await asyncio.gather(*callers)
+
+    assert [response.status_code for response in responses] == [200, 200]
+    assert maximum_active == 1
+    assert attempts == {
+        "Bearer caller-0": [256, 512],
+        "Bearer caller-1": [256, 512],
+    }
+
+
+@pytest.mark.anyio
 async def test_exhausted_admission_rejects_without_backend_work(
     metadata_directory: Path,
 ) -> None:
@@ -1999,6 +2434,59 @@ async def test_request_deadline_cancels_backend_work_and_releases_capacity(
         for transport_timeout in transport_timeouts
         for timeout in transport_timeout.values()
     )
+
+
+@pytest.mark.anyio
+async def test_deadline_includes_multiple_probability_coverage_attempts(
+    metadata_directory: Path,
+) -> None:
+    retry_started = asyncio.Event()
+    retry_cancelled = asyncio.Event()
+    target_coverages: list[int] = []
+
+    async def backend(request: httpx.Request) -> httpx.Response:
+        coverage = json.loads(request.content)["n_probs"]
+        target_coverages.append(coverage)
+        if coverage == 256:
+            return completion_response(
+                {1: 0.9},
+                coverage=coverage,
+                excluded_token_ids=(2,),
+            )
+        retry_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            retry_cancelled.set()
+        raise AssertionError("cancelled retry must not return a response")
+
+    app = create_app(
+        configured_settings(
+            metadata_directory,
+            backend_slots=1,
+            admission_capacity=1,
+            request_deadline_seconds=0.05,
+        ),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
+    )
+
+    async with (
+        app.router.lifespan_context(app),
+        service_client(app) as client,
+    ):
+        response_task = asyncio.create_task(
+            client.post(
+                "/v1/systemone",
+                headers={"Authorization": "Bearer target-key"},
+                json=choice_request_payload(),
+            )
+        )
+        await asyncio.wait_for(retry_started.wait(), timeout=2)
+        response = await asyncio.wait_for(response_task, timeout=2)
+        await asyncio.wait_for(retry_cancelled.wait(), timeout=2)
+
+    assert response.status_code == 504
+    assert target_coverages == [256, 512]
 
 
 @pytest.mark.anyio

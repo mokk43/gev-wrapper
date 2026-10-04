@@ -309,13 +309,20 @@ def create_app(
         async def evaluate_admitted_request() -> DecisionResult:
             async with app.state.decision_capacity.admit():
                 runtime = app.state.decision_runtime
+                capabilities = app.state.backend_capabilities
                 return await evaluate_request(
                     request,
                     runtime=runtime,
                     client=app.state.backend_client,
                     capacity=app.state.decision_capacity,
                     bearer_token=bearer_token,
-                    probability_coverage=settings.initial_probability_coverage,
+                    initial_probability_coverage=(
+                        settings.initial_probability_coverage
+                    ),
+                    maximum_probability_coverage=(
+                        capabilities.maximum_probability_coverage
+                    ),
+                    vocabulary_size=capabilities.vocabulary_size,
                     deadline=deadline,
                 )
 

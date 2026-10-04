@@ -111,17 +111,29 @@ def completion_response(
     *,
     input_tokens: int = 11,
     output_tokens: int = 1,
+    coverage: int = 256,
 ) -> httpx.Response:
+    covered_token_ids = set(probabilities)
+    filler_token_ids = (
+        token_id
+        for token_id in range(coverage + len(covered_token_ids))
+        if token_id not in covered_token_ids
+    )
+    top_logprobs = [
+        {"id": token_id, "logprob": math.log(probability)}
+        for token_id, probability in probabilities.items()
+    ]
+    top_logprobs.extend(
+        {"id": next(filler_token_ids), "logprob": -1000.0}
+        for _ in range(coverage - len(top_logprobs))
+    )
     return httpx.Response(
         200,
         json={
             "content": "generated text is ignored",
             "probs": [
                 {
-                    "top_logprobs": [
-                        {"id": token_id, "logprob": math.log(probability)}
-                        for token_id, probability in probabilities.items()
-                    ]
+                    "top_logprobs": top_logprobs
                 }
             ],
             "tokens_cached": 0,

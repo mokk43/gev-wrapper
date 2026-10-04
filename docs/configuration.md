@@ -37,7 +37,7 @@ not committed.
 | `DECIDER_BIND_HOST` | `127.0.0.1` | Listen address. This catalog slice rejects non-loopback addresses until authentication and exposure checks are implemented. |
 | `DECIDER_BIND_PORT` | `8000` | Listen port. |
 | `DECIDER_REQUEST_DEADLINE_SECONDS` | `60` | Whole-request deadline in seconds across admission, offloaded preparation, backend-slot waiting, evaluation, and assembly. Each backend transport timeout is limited to the remaining request budget. |
-| `DECIDER_INITIAL_PROBABILITY_COVERAGE` | `256` | llama.cpp `n_probs` used by Choice evaluation. Missing required labels currently fail with 502; recovery is a later slice. |
+| `DECIDER_INITIAL_PROBABILITY_COVERAGE` | `256` | Compatibility input accepted only as `256`; each backend row always starts recovery at 256. Missing required option token IDs trigger the bounded schedule below. |
 | `DECIDER_STARTUP_PROBE_ATTEMPTS` | `3` | Maximum readiness attempts against `GET /health`. |
 | `DECIDER_STARTUP_PROBE_TIMEOUT_SECONDS` | `30` | Whole deadline for all startup compatibility checks. |
 | `DECIDER_STARTUP_TOKENIZER_PROBE_CHUNK_SIZE` | `4096` | Token IDs per `/detokenize` request while comparing the complete local and backend vocabularies. Accepted range: 1 through 8192. |
@@ -101,6 +101,31 @@ the request-local input/output counters across rows. A
 selected build that does not expose the documented `/v1/models`, `/props`,
 `/detokenize`, `/tokenize`, and `/completion` shapes is unsupported and fails
 startup.
+
+## Runtime probability coverage recovery
+
+Each backend row starts at 256. If an otherwise valid response omits a required
+option token ID, the service doubles coverage for the next attempt and clamps
+the final attempt to the readiness-verified
+`DECIDER_MAXIMUM_PROBABILITY_COVERAGE`. For example, a verified maximum of 600
+produces `256`, `512`, then `600`. The final attempt is full-vocabulary only
+when that verified maximum equals the verified backend vocabulary size.
+
+Every attempt requests matching `n_probs` and `min_keep` values. The response
+must contain exactly one final-slot `probs` element and exactly the requested
+number of `top_logprobs` entries. Each entry must have a unique integer token ID
+within the verified vocabulary and a finite numeric log probability. Only a
+valid response that lacks at least one required option token ID is retried;
+malformed coverage, token IDs, probabilities, or counters fail with a sanitized
+502 response.
+
+Retries remain inside the admitted request. Each attempt acquires capacity from
+the same global backend-slot limit and uses the same whole-request deadline.
+Deadline or cancellation stops further attempts. On success,
+`usage.input_tokens` and `usage.output_tokens` sum the verified backend counters
+from every attempt, including attempts whose valid coverage omitted required
+option IDs. These runtime guarantees are covered by controlled fixtures; no
+live backend result is recorded in this repository.
 
 The documented local backend and key are test inputs, not defaults. Choice
 requests forward their caller's bearer credential on each backend row without

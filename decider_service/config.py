@@ -122,6 +122,8 @@ class Settings(BaseSettings):
                 "initial_probability_coverage must not exceed "
                 "maximum_probability_coverage"
             )
+        if self.initial_probability_coverage != 256:
+            raise ValueError("initial_probability_coverage must be 256")
         if self.operator_probe_api_key.get_secret_value() == INVALID_PROBE_CREDENTIAL:
             raise ValueError("operator_probe_api_key uses the reserved rejection probe")
         return self

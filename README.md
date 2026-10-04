@@ -16,9 +16,10 @@ shutdown cancel pending request tasks and release service capacity. Offloaded
 preparation and assembly remain separately bounded until their worker threads
 finish. Startup blocks traffic until pinned local metadata and the selected
 llama.cpp deployment pass bounded artifact, build, tokenizer, context,
-probability, counter, and authentication checks. Coverage recovery and the final
-catalog authentication boundary remain separate implementation slices. The
-service remains restricted to loopback and is not production-ready.
+probability, counter, and authentication checks. Missing option probabilities
+now trigger bounded coverage recovery. The final catalog authentication
+boundary remains a separate implementation slice. The service remains
+restricted to loopback and is not production-ready.
 
 ## Catalog setup
 
@@ -83,8 +84,11 @@ curl http://127.0.0.1:8000/v1/systemone \
 The response maps native `tokens_evaluated` and `tokens_predicted` counters to
 `usage.input_tokens` and `usage.output_tokens`. Startup verifies their uncached
 one-row semantics against the selected build; mock-backed tests establish
-request-local summing. Retry-inclusive accounting remains part of the coverage
-recovery slice.
+request-local summing. When a valid response omits a required option token ID,
+the row retries from 256 with doubled probability coverage, clamping the final
+attempt to the readiness-verified maximum. Retries use the same backend slot
+limit and whole-request deadline. Successful usage includes the counters from
+every coverage attempt.
 
 ## Project documents
 

@@ -14,6 +14,7 @@ from decider_service.readiness import StartupValidationError, _canonical_quantiz
 from tests.readiness_support import (
     PROBE_KEY,
     ControlledBackend,
+    completion_response,
     configured_settings,
     write_test_manifest,
     write_test_metadata,
@@ -54,23 +55,7 @@ async def test_startup_verifies_backend_before_serving_inference(
 
     def runtime_response(request: httpx.Request) -> httpx.Response:
         runtime_requests.append(request)
-        return httpx.Response(
-            200,
-            json={
-                "probs": [
-                    {
-                        "top_logprobs": [
-                            {"id": 1, "logprob": -0.1},
-                            {"id": 2, "logprob": -2.0},
-                        ]
-                    }
-                ],
-                "tokens_cached": 0,
-                "tokens_evaluated": 11,
-                "tokens_predicted": 1,
-                "truncated": False,
-            },
-        )
+        return completion_response({1: 0.87, 2: 0.13})
 
     backend = ControlledBackend(metadata_directory, runtime_response)
     app = create_app(
@@ -599,6 +584,20 @@ def test_configuration_rejects_probability_coverage_above_declared_maximum(
         configured_settings(
             metadata_directory,
             initial_probability_coverage=513,
+            maximum_probability_coverage=512,
+        )
+
+
+def test_configuration_requires_top_256_initial_probability_coverage(
+    metadata_directory: Path,
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match="initial_probability_coverage must be 256",
+    ):
+        configured_settings(
+            metadata_directory,
+            initial_probability_coverage=128,
             maximum_probability_coverage=512,
         )
 

@@ -61,6 +61,13 @@ class BackendProbabilityCoverageError(BackendContractError):
     pass
 
 
+class BackendMissingOptionCoverageError(BackendContractError):
+    def __init__(self, input_tokens: int, output_tokens: int) -> None:
+        super().__init__("backend probability coverage omitted a required option")
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
+
+
 class BackendProbabilityDataError(BackendContractError):
     pass
 
@@ -407,9 +414,18 @@ def parse_backend_row(
     if not isinstance(body, dict):
         raise BackendContractError("backend returned malformed completion data")
     typed_body = cast(dict[str, Any], body)
+    probabilities = typed_body.get("probs")
+    if (
+        not isinstance(probabilities, list)
+        or len(probabilities) != 1
+        or not isinstance(probabilities[0], dict)
+    ):
+        raise BackendProbabilityDataError(
+            "backend returned malformed probability data"
+        )
     try:
-        top_logprobs = typed_body["probs"][0]["top_logprobs"]
-    except (KeyError, IndexError, TypeError) as exc:
+        top_logprobs = probabilities[0]["top_logprobs"]
+    except (KeyError, TypeError) as exc:
         raise BackendProbabilityDataError(
             "backend returned malformed probability data"
         ) from exc
@@ -447,13 +463,6 @@ def parse_backend_row(
             )
         by_token_id[token_id] = float(log_probability)
 
-    try:
-        probabilities = tuple(by_token_id[token_id] for token_id in required_token_ids)
-    except KeyError as exc:
-        raise BackendContractError(
-            "backend probability coverage omitted a required option"
-        ) from exc
-
     input_tokens = _required_nonnegative_integer(typed_body, "tokens_evaluated")
     output_tokens = _required_nonnegative_integer(typed_body, "tokens_predicted")
     cached_tokens = _required_nonnegative_integer(typed_body, "tokens_cached")
@@ -465,7 +474,28 @@ def parse_backend_row(
         )
     if typed_body.get("truncated") is True:
         raise BackendContractError("backend truncated a rendered prompt")
-    return BackendRow(probabilities, input_tokens, output_tokens)
+    try:
+        required_probabilities = tuple(
+            by_token_id[token_id] for token_id in required_token_ids
+        )
+    except KeyError as exc:
+        raise BackendMissingOptionCoverageError(
+            input_tokens,
+            output_tokens,
+        ) from exc
+    return BackendRow(required_probabilities, input_tokens, output_tokens)
+
+
+def _probability_coverage_schedule(
+    initial_coverage: int,
+    maximum_coverage: int,
+) -> Iterator[int]:
+    coverage = initial_coverage
+    while True:
+        yield coverage
+        if coverage == maximum_coverage:
+            return
+        coverage = min(coverage * 2, maximum_coverage)
 
 
 async def _evaluate_row(
@@ -474,37 +504,63 @@ async def _evaluate_row(
     row: PreparedRow,
     label_token_ids: tuple[int, ...],
     bearer_token: str,
-    probability_coverage: int,
+    initial_probability_coverage: int,
+    maximum_probability_coverage: int,
+    vocabulary_size: int,
     deadline: float,
 ) -> BackendRow:
-    payload = completion_payload(row, probability_coverage)
-    try:
-        async with capacity.backend_slot():
-            remaining = deadline - asyncio.get_running_loop().time()
-            if remaining <= 0:
-                raise TimeoutError
-            response = await client.post(
-                "/completion",
-                headers={"Authorization": f"Bearer {bearer_token}"},
-                json=payload,
-                timeout=remaining,
+    input_tokens = 0
+    output_tokens = 0
+    for probability_coverage in _probability_coverage_schedule(
+        initial_probability_coverage,
+        maximum_probability_coverage,
+    ):
+        payload = completion_payload(row, probability_coverage)
+        try:
+            async with capacity.backend_slot():
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise TimeoutError
+                response = await client.post(
+                    "/completion",
+                    headers={"Authorization": f"Bearer {bearer_token}"},
+                    json=payload,
+                    timeout=remaining,
+                )
+                if response.status_code in {401, 403}:
+                    raise CallerAuthenticationError(response.status_code)
+                response.raise_for_status()
+        except httpx.TimeoutException as exc:
+            if asyncio.get_running_loop().time() >= deadline:
+                raise TimeoutError from exc
+            raise BackendUnavailableError("backend request timed out") from exc
+        except httpx.RequestError as exc:
+            raise BackendUnavailableError("backend request failed") from exc
+        except httpx.HTTPStatusError as exc:
+            raise BackendUnavailableError("backend rejected the request") from exc
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise BackendContractError("backend returned malformed JSON") from exc
+        try:
+            result = parse_backend_row(
+                body,
+                label_token_ids[: row.option_count],
+                expected_probability_coverage=probability_coverage,
+                vocabulary_size=vocabulary_size,
             )
-            if response.status_code in {401, 403}:
-                raise CallerAuthenticationError(response.status_code)
-            response.raise_for_status()
-    except httpx.TimeoutException as exc:
-        if asyncio.get_running_loop().time() >= deadline:
-            raise TimeoutError from exc
-        raise BackendUnavailableError("backend request timed out") from exc
-    except httpx.RequestError as exc:
-        raise BackendUnavailableError("backend request failed") from exc
-    except httpx.HTTPStatusError as exc:
-        raise BackendUnavailableError("backend rejected the request") from exc
-    try:
-        body = response.json()
-    except ValueError as exc:
-        raise BackendContractError("backend returned malformed JSON") from exc
-    return parse_backend_row(body, label_token_ids[: row.option_count])
+        except BackendMissingOptionCoverageError as exc:
+            input_tokens += exc.input_tokens
+            output_tokens += exc.output_tokens
+            if probability_coverage == maximum_probability_coverage:
+                raise
+            continue
+        return BackendRow(
+            result.log_probabilities,
+            input_tokens + result.input_tokens,
+            output_tokens + result.output_tokens,
+        )
+    raise AssertionError("probability coverage schedule must not be empty")
 
 
 def completion_payload(
@@ -618,7 +674,9 @@ async def evaluate_request(
     client: httpx.AsyncClient,
     capacity: DecisionCapacity,
     bearer_token: str,
-    probability_coverage: int,
+    initial_probability_coverage: int,
+    maximum_probability_coverage: int,
+    vocabulary_size: int,
     deadline: float,
 ) -> DecisionResult:
     prepared = await capacity.run_offloaded(lambda: runtime.prepare(request))
@@ -632,7 +690,9 @@ async def evaluate_request(
                 row,
                 prepared.label_token_ids,
                 bearer_token,
-                probability_coverage,
+                initial_probability_coverage,
+                maximum_probability_coverage,
+                vocabulary_size,
                 deadline,
             )
             for row in prepared.rows

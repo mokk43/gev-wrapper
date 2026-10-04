@@ -50,7 +50,7 @@ value remains an unresolved operator input and must be replaced with observed,
 deployment-specific evidence before launch.
 
 ```shell
-export DECIDER_BACKEND_URL='http://127.0.0.1:8080'
+export DECIDER_BACKEND_URL='http://127.0.0.1:5080'
 export DECIDER_BACKEND_BUILD='<exact GET /props build_info>'
 export DECIDER_BACKEND_MODEL_ID='<exact GET /v1/models model id>'
 export DECIDER_BACKEND_MODEL_PATH='<exact GET /props model_path>'

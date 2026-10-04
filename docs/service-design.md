@@ -1,6 +1,9 @@
 # Accepted service design
 
-Status: accepted on 2026-10-02; local development inputs and caller-key forwarding amended by the user on 2026-10-03. Implementation began with the model-catalog slice on 2026-10-03.
+Status: accepted on 2026-10-02; local development inputs and caller-key
+forwarding amended by the user on 2026-10-03; local backend port corrected by
+the user on 2026-10-04. Implementation began with the model-catalog slice on
+2026-10-03.
 
 ## Purpose and boundary
 
@@ -102,13 +105,22 @@ The coverage retries above are accepted. A broader transient-error retry policy 
 
 ## Configuration and deployment inputs
 
-Use environment-based configuration. The user supplied the following local development fixture on 2026-10-03:
+Use environment-based configuration. The user supplied the following local
+development fixture on 2026-10-03 and corrected its port on 2026-10-04:
 
-- Backend base URL: `http://127.0.0.1:8080`.
-- Native completion endpoint: `http://127.0.0.1:8080/completion`, serving decider-4b.
+- Backend base URL: `http://127.0.0.1:5080`.
+- Native completion endpoint: `http://127.0.0.1:5080/completion`, serving decider-4b.
 - Local test API key: `llama5080`. Explicit local test clients send it as `Authorization: Bearer llama5080`; bounded startup probes may use it through operator configuration.
 
-These are user-provided test inputs, not observed server availability or verified capabilities. Keep the test key in explicit local configuration and test invocations, not a hardcoded production credential or runtime fallback. The remaining required deployment information is the backend build, GGUF revision/quantization, matching metadata directory/revision, public model identity and release date, aliases, backend context capacity and parallel slots, and probability/usage capabilities. A real deployment still needs its own configured backend address.
+These are user-provided test inputs. Direct observations and incompatibilities
+from 2026-10-04 are recorded in the [verification record](verification.md); they
+do not establish complete deployment compatibility. Keep the test key in
+explicit local configuration and test invocations, not a hardcoded production
+credential or runtime fallback. The remaining required deployment information
+includes immutable GGUF provenance, matching metadata, public model identity
+and release date, aliases, and a backend build satisfying the probability and
+cache-counter contract. A real deployment still needs its own configured
+backend address.
 
 Also configure backend concurrency, admission capacity, request limits, and an operator startup probe credential when backend authentication requires one. Their numerical values and variable names are implementation/deployment choices, not settled measurements. Expected traffic, typical question counts, and a measured latency target have not been supplied; the 60-second deadline is a guardrail, not a performance claim.
 

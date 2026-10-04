@@ -422,7 +422,7 @@ def parse_backend_row(
     if not isinstance(body, dict):
         raise BackendContractError("backend returned malformed completion data")
     typed_body = cast(dict[str, Any], body)
-    probabilities = typed_body.get("probs")
+    probabilities = typed_body.get("completion_probabilities")
     if (
         not isinstance(probabilities, list)
         or len(probabilities) != 1
@@ -492,11 +492,23 @@ def parse_backend_row(
     input_tokens = _required_nonnegative_integer(typed_body, "tokens_evaluated")
     output_tokens = _required_nonnegative_integer(typed_body, "tokens_predicted")
     cached_tokens = _required_nonnegative_integer(typed_body, "tokens_cached")
+    timings = typed_body.get("timings")
+    if not isinstance(timings, dict):
+        raise BackendContractError("backend returned malformed token counters")
+    typed_timings = cast(dict[str, Any], timings)
+    reused_tokens = _required_nonnegative_integer(typed_timings, "cache_n")
+    processed_tokens = _required_nonnegative_integer(typed_timings, "prompt_n")
+    predicted_tokens = _required_nonnegative_integer(typed_timings, "predicted_n")
     if output_tokens != 1:
         raise BackendContractError("backend returned an unexpected prediction count")
-    if cached_tokens != 0:
+    if (
+        reused_tokens != 0
+        or processed_tokens != input_tokens
+        or cached_tokens != input_tokens
+        or predicted_tokens != output_tokens
+    ):
         raise BackendCounterSemanticsError(
-            "backend returned cached work when prompt caching was disabled"
+            "backend returned inconsistent uncached prompt counters"
         )
     if typed_body.get("truncated") is True:
         raise BackendContractError("backend truncated a rendered prompt")

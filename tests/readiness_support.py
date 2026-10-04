@@ -128,7 +128,9 @@ def completion_response(
     *,
     input_tokens: int = 11,
     output_tokens: int = 1,
-    cached_tokens: int = 0,
+    cached_tokens: int | None = None,
+    reused_tokens: int = 0,
+    processed_tokens: int | None = None,
     coverage: int = 256,
     excluded_token_ids: tuple[int, ...] = (),
 ) -> httpx.Response:
@@ -150,14 +152,21 @@ def completion_response(
         200,
         json={
             "content": "generated text is ignored",
-            "probs": [
+            "completion_probabilities": [
                 {
                     "top_logprobs": top_logprobs
                 }
             ],
-            "tokens_cached": cached_tokens,
+            "tokens_cached": input_tokens if cached_tokens is None else cached_tokens,
             "tokens_evaluated": input_tokens,
             "tokens_predicted": output_tokens,
+            "timings": {
+                "cache_n": reused_tokens,
+                "prompt_n": (
+                    input_tokens if processed_tokens is None else processed_tokens
+                ),
+                "predicted_n": output_tokens,
+            },
             "truncated": False,
         },
     )
@@ -256,7 +265,7 @@ class ControlledBackend:
             return httpx.Response(
                 200,
                 json={
-                    "probs": [
+                    "completion_probabilities": [
                         {
                             "top_logprobs": [
                                 {
@@ -267,9 +276,14 @@ class ControlledBackend:
                             ]
                         }
                     ],
-                    "tokens_cached": 0,
+                    "tokens_cached": len(completion_body["prompt"]),
                     "tokens_evaluated": len(completion_body["prompt"]),
                     "tokens_predicted": 1,
+                    "timings": {
+                        "cache_n": 0,
+                        "prompt_n": len(completion_body["prompt"]),
+                        "predicted_n": 1,
+                    },
                     "truncated": False,
                 },
             )

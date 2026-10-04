@@ -120,8 +120,9 @@ GGUF weights belong to the external llama.cpp deployment. The service needs matc
 
 The user supplied a local decider-4b test backend; its address and test
 credential are recorded in the [service configuration requirements](docs/service-design.md#configuration-and-deployment-inputs).
-The 2026-10-04 availability attempt and its limits are recorded in the
-[verification record](docs/verification.md); the backend was unavailable, so no
+The 2026-10-04 direct checks and their limits are recorded in the
+[verification record](docs/verification.md); the backend was reachable but its
+probability and cache-counter response did not satisfy the startup contract, so no
 selected deployment has passed live verification. Each service start verifies
 the configured deployment before accepting traffic. Decision requests require
 TypeSafe-format bearer credentials, forwarded to the configured backend per

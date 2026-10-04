@@ -58,8 +58,10 @@ threads already running, and closes the shared HTTP client. Closing the client
 side of an in-flight request does not prove the backend stopped inference.
 
 The launch, public catalog check, and process-signal shutdown commands above
-were not run against a selected deployment on 2026-10-04 because the backend
-and required operator inputs were unavailable. The controlled suite exercises
+were not run against a selected deployment on 2026-10-04 because required
+metadata, artifact provenance, and a separate caller key were unavailable, and
+the reachable backend failed the required probability/cache response contract.
+The controlled suite exercises
 the same application startup, authenticated public catalog, request
 cancellation, and shutdown behavior without claiming live compatibility.
 
@@ -77,7 +79,7 @@ added 1 package in 329ms
 
 The installed console entry points and environment parsing were also exercised.
 The validation command used a complete temporary controlled fixture, not the
-unavailable local deployment:
+incompatible local deployment:
 
 ```text
 $ uv run decider-service --help
@@ -149,7 +151,7 @@ HTTP-schema differences. They do not contact TypeSafe's hosted service.
 ## Optional live check
 
 First configure the service against the user-managed local fixture at
-`http://127.0.0.1:8080` and start the service on `http://127.0.0.1:8000`. Then
+`http://127.0.0.1:5080` and start the service on `http://127.0.0.1:8000`. Then
 run the public smoke check with a backend-issued caller key explicitly:
 
 ```shell
@@ -188,27 +190,42 @@ measured performance target.
 
 ## Actual live result and unavailable evidence
 
-The supplied backend address was checked directly before attempting to launch a
-fully configured service:
+The corrected backend address `http://127.0.0.1:5080` was reachable. Bounded
+direct checks with the supplied `llama5080` key observed:
 
 ```text
-$ curl --silent --show-error --connect-timeout 2 --max-time 3 \
-    http://127.0.0.1:8080/v1/models \
-    -H 'Authorization: Bearer llama5080'
-curl: (7) Failed to connect to 127.0.0.1 port 8080 after 0 ms: Couldn't connect to server
+GET /health                                      200 {"status":"ok"}
+GET /v1/models with llama5080                    200
+GET /v1/models with an invalid key               401 authentication_error
+POST /completion with an invalid key             401 authentication_error
+POST /tokenize for "A" with special tokens off    200 {"tokens":[32]}
 ```
 
-Therefore no public live smoke run was possible on 2026-10-04. The following
-checks remain unavailable, not failed compatibility claims:
+The catalog and properties reported
+`/opt/llama/models/decider-4b-v2.1-Q4_K_M.gguf`, `Q4_K - Medium`, vocabulary
+size 248,320, effective context 4,096, training context 262,144, two slots, and
+build identity `b0-unknown`. These values describe the responding process; they
+do not prove the GGUF digest or metadata revision.
 
-- Selected-build authentication enforcement on `/v1/models` and `/completion`,
-  including acceptance of `llama5080` and rejection of an invalid key.
-- Exact llama.cpp build, loaded model identity and path, GGUF revision and
-  quantization, matching metadata revision, vocabulary, effective context, and
-  parallel-slot capacity.
-- Complete tokenizer agreement, option-label token IDs, supported maximum
-  `n_probs`/`min_keep` coverage, returned probability mass, counter semantics,
-  and disabled-cache behavior on that deployment.
+A single-token completion requested `n_probs=256`, `min_keep=256`, one
+prediction, pre-sampling probabilities, and disabled prompt caching. The server
+returned HTTP 200 with one probability slot and 256 unique token IDs, but the
+field was named `completion_probabilities` rather than the required `probs`.
+It reported `tokens_evaluated=1`, `tokens_predicted=1`, and `tokens_cached=1`
+despite `cache_prompt=false`. The top-256 returned probability mass was
+`0.47338697444864825` and the response was not truncated.
+
+That response is incompatible with the accepted startup contract, which
+requires `probs[0].top_logprobs` and zero cached tokens. The service therefore
+cannot accept this selected backend without a deliberate contract or backend
+change. No public live smoke run was attempted. The following checks remain
+unavailable:
+
+- Complete tokenizer agreement and option-label token IDs; the single `"A"`
+  tokenization probe is not sufficient evidence.
+- Maximum supported `n_probs`/`min_keep` coverage; only top-256 was exercised.
+- Immutable GGUF provenance, matching metadata revision, and a successful
+  service startup compatibility gate.
 - The character format of an issued live TypeSafe key. `llama5080` is a supplied
   local backend test key, not evidence about TypeSafe's issuer.
 - A separate backend-issued runtime caller key. The service cannot use its
@@ -217,8 +234,8 @@ checks remain unavailable, not failed compatibility claims:
   fixed comparison corpus, matching artifact identity, or justified tolerance
   was supplied, so GGUF prediction and quantization equivalence are unverified.
 - Representative workload measurements for latency, queueing, concurrency, and
-  throughput. No workload fixture or reachable deployment was supplied; the
-  60-second request deadline must not be reported as observed latency.
+  throughput. No workload fixture or compatible running service was supplied;
+  the 60-second request deadline must not be reported as observed latency.
 
 Controlled fixtures establish HTTP behavior only. They do not close any of the
 live-deployment gaps above.

@@ -196,6 +196,65 @@ async def test_choice_is_evaluated_through_the_public_http_boundary(
 
 
 @pytest.mark.anyio
+async def test_choice_accepts_native_llama_cpp_probability_field(
+    metadata_directory: Path,
+) -> None:
+    def backend(_request: httpx.Request) -> httpx.Response:
+        body = completion_response({1: 0.2, 2: 0.8}).json()
+        return httpx.Response(200, json=body)
+
+    app = create_app(
+        configured_settings(metadata_directory),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
+    )
+
+    async with (
+        app.router.lifespan_context(app),
+        service_client(app) as client,
+    ):
+        response = await client.post(
+            "/v1/systemone",
+            headers={"Authorization": "Bearer caller-key"},
+            json=choice_request_payload(),
+        )
+
+    assert response.status_code == 200
+    assert response.json()["answers"]["priority"]["choice"] == "routine"
+    assert response.json()["usage"] == {
+        "input_tokens": 11,
+        "output_tokens": 1,
+    }
+
+
+@pytest.mark.anyio
+async def test_runtime_rejects_reused_prompt_work(
+    metadata_directory: Path,
+) -> None:
+    def backend(_request: httpx.Request) -> httpx.Response:
+        return completion_response({1: 0.2, 2: 0.8}, reused_tokens=1)
+
+    app = create_app(
+        configured_settings(metadata_directory),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
+    )
+
+    async with (
+        app.router.lifespan_context(app),
+        service_client(app) as client,
+    ):
+        response = await client.post(
+            "/v1/systemone",
+            headers={"Authorization": "Bearer caller-key"},
+            json=choice_request_payload(),
+        )
+
+    assert response.status_code == 502
+    assert response.json() == {
+        "detail": "Backend response did not satisfy the inference contract."
+    }
+
+
+@pytest.mark.anyio
 async def test_missing_option_probabilities_expand_coverage_and_include_retry_usage(
     metadata_directory: Path,
 ) -> None:
@@ -257,7 +316,7 @@ async def test_runtime_rejects_probability_data_larger_than_requested_coverage(
         return httpx.Response(
             200,
             json={
-                "probs": [
+                "completion_probabilities": [
                     {
                         "top_logprobs": [
                             {"id": token_id, "logprob": -float(token_id + 1)}
@@ -1531,17 +1590,17 @@ async def test_request_body_limit_returns_a_field_oriented_error(
     "backend_body",
     [
         {
-            "probs": [{"top_logprobs": [{"id": 1, "logprob": -0.1}]}],
+            "completion_probabilities": [{"top_logprobs": [{"id": 1, "logprob": -0.1}]}],
             "tokens_evaluated": 10,
             "tokens_predicted": 1,
         },
         {
-            "probs": "invalid",
+            "completion_probabilities": "invalid",
             "tokens_evaluated": 10,
             "tokens_predicted": 1,
         },
         {
-            "probs": [
+            "completion_probabilities": [
                 {
                     "top_logprobs": [
                         {"id": 1, "logprob": float("nan")},
@@ -1553,7 +1612,7 @@ async def test_request_body_limit_returns_a_field_oriented_error(
             "tokens_predicted": 1,
         },
         {
-            "probs": [
+            "completion_probabilities": [
                 {
                     "top_logprobs": [
                         {"id": 1, "logprob": -0.1},
@@ -1564,7 +1623,7 @@ async def test_request_body_limit_returns_a_field_oriented_error(
             "tokens_evaluated": 10,
         },
         {
-            "probs": [
+            "completion_probabilities": [
                 {
                     "top_logprobs": [
                         {"id": 1, "logprob": -0.1},
@@ -1657,16 +1716,16 @@ async def test_malformed_coverage_attempts_are_not_retried(
         if malformation == "missing_counter_on_incomplete_coverage":
             del body["tokens_cached"]
         elif malformation == "wrong_token_id":
-            body["probs"][0]["top_logprobs"][-1]["id"] = 99_999
+            body["completion_probabilities"][0]["top_logprobs"][-1]["id"] = 99_999
         elif malformation == "multiple_final_slots":
-            body["probs"].append(body["probs"][0])
+            body["completion_probabilities"].append(body["completion_probabilities"][0])
         elif malformation == "nonfinite_probability":
-            body["probs"][0]["top_logprobs"][0]["logprob"] = float("nan")
+            body["completion_probabilities"][0]["top_logprobs"][0]["logprob"] = float("nan")
         elif malformation == "positive_log_probability":
-            body["probs"][0]["top_logprobs"][0]["logprob"] = 1.0
+            body["completion_probabilities"][0]["top_logprobs"][0]["logprob"] = 1.0
         else:
-            body["probs"][0]["top_logprobs"][0]["logprob"] = 0.0
-            body["probs"][0]["top_logprobs"][1]["logprob"] = 0.0
+            body["completion_probabilities"][0]["top_logprobs"][0]["logprob"] = 0.0
+            body["completion_probabilities"][0]["top_logprobs"][1]["logprob"] = 0.0
         return httpx.Response(
             200,
             content=json.dumps(body, allow_nan=True),

@@ -17,8 +17,10 @@
 - [x] Measure representative workload behavior before increasing concurrency or making latency claims. If deployment/workload measurements are unavailable, document that limitation; the accepted 60-second deadline remains a guardrail rather than a measured performance target.
 
 Controlled HTTP and official SDK verification completed on 2026-10-04. The local
-backend was unreachable at `127.0.0.1:8080`, and no separate caller key, issued
-TypeSafe key, trusted Decider baseline, or workload fixture was available. The
+backend at `127.0.0.1:5080` was reachable and enforced authentication, but its
+probability field and cache counter were incompatible with the accepted startup
+contract. No separate caller key, issued TypeSafe key, trusted Decider baseline,
+or workload fixture was available. The
 exact unverified deployment and performance checks are recorded in
 [`docs/verification.md`](../../../docs/verification.md); no live compatibility,
 quantization-equivalence, or latency claim is made.

@@ -302,7 +302,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--rejected-api-key",
-        default=os.getenv("DECIDER_REJECTED_CALLER_API_KEY"),
+        default=os.getenv("DECIDER_REJECTED_CALLER_API_KEY") or None,
         help=(
             "known rejected backend key for live auth enforcement "
             "(or DECIDER_REJECTED_CALLER_API_KEY)"

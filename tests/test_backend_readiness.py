@@ -221,10 +221,10 @@ async def test_startup_rejects_backend_quantization_mismatch(
 @pytest.mark.parametrize(
     ("body", "message"),
     [
-        ({"probs": "invalid"}, "returned malformed probability data"),
+        ({"completion_probabilities": "invalid"}, "returned malformed probability data"),
         (
             {
-                "probs": [
+                "completion_probabilities": [
                     {
                         "top_logprobs": [
                             {"id": token_id, "logprob": -float(token_id + 1)}
@@ -303,7 +303,7 @@ async def test_startup_rejects_out_of_vocabulary_probability_token_ids(
             and request.headers.get("Authorization") == f"Bearer {PROBE_KEY}"
         ):
             body = backend(request).json()
-            body["probs"][0]["top_logprobs"][0]["id"] = 99_999
+            body["completion_probabilities"][0]["top_logprobs"][0]["id"] = 99_999
             return httpx.Response(200, json=body)
         return backend(request)
 
@@ -326,7 +326,7 @@ async def test_startup_rejects_probability_coverage_without_required_option_id(
             and request.headers.get("Authorization") == f"Bearer {PROBE_KEY}"
         ):
             body = backend(request).json()
-            body["probs"][0]["top_logprobs"][2]["id"] = 512
+            body["completion_probabilities"][0]["top_logprobs"][2]["id"] = 512
             return httpx.Response(200, json=body)
         return backend(request)
 

@@ -136,5 +136,12 @@ The accepted service design owns technical requirements. The ordered work packag
 ## Further Notes
 
 - [The accepted service design](service-design.md) remains the technical source of truth; this plan orders its implementation. [The glossary](../CONTEXT.md) supplies domain terms, and [ADR 0001](adr/0001-report-model-identity-and-backend-work.md) explains response provenance/accounting.
-- The user supplied local development backend access and amended authentication to caller-key forwarding on 2026-10-03; the accepted design records those inputs and requirements. Backend build, GGUF revision and quantization, matching metadata directory, configured model identity/release date, capacity, and verified probability/usage capabilities remain unresolved. Real deployment backend addresses are still operator inputs.
+- The user supplied local development backend access and amended authentication
+  to caller-key forwarding on 2026-10-03, then corrected the local port on
+  2026-10-04. The accepted design records those inputs. Direct checks against
+  the corrected endpoint are recorded in the verification report; the observed
+  probability field and cache counter are incompatible with the accepted
+  startup contract. Immutable GGUF provenance, matching metadata, configured
+  public identity/release date, and a compatible build remain unresolved. Real
+  deployment backend addresses are still operator inputs.
 - No application or live-backend tests have run for this document. Planning verification is limited to document consistency, links, and formatting.

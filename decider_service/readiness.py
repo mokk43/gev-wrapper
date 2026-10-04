@@ -181,6 +181,8 @@ async def validate_backend_deployment(
     settings: Settings,
     runtime: DecisionRuntime,
     client: httpx.AsyncClient,
+    *,
+    validate_identity: bool = True,
 ) -> BackendCapabilities:
     deadline = (
         asyncio.get_running_loop().time() + settings.startup_probe_timeout_seconds
@@ -214,7 +216,7 @@ async def validate_backend_deployment(
                     "backend /v1/models must describe exactly one loaded model"
                 )
             model = cast(dict[str, Any], data[0])
-            if model.get("id") != settings.backend_model_id:
+            if validate_identity and model.get("id") != settings.backend_model_id:
                 raise StartupValidationError(
                     "backend model identity does not match configured backend_model_id"
                 )
@@ -227,22 +229,29 @@ async def validate_backend_deployment(
                 metadata.get("n_vocab"),
                 "backend /v1/models returned an invalid vocabulary size",
             )
-            training_context = _positive_integer(
-                metadata.get("n_ctx_train"),
-                "backend /v1/models returned an invalid training context capacity",
-            )
-            backend_ftype = metadata.get("ftype")
-            if not isinstance(backend_ftype, str) or not backend_ftype.strip():
-                raise StartupValidationError(
-                    "backend /v1/models did not expose model quantization"
+            context_capacity = settings.context_capacity
+            if validate_identity:
+                training_context = _positive_integer(
+                    metadata.get("n_ctx_train"),
+                    "backend /v1/models returned an invalid training context capacity",
                 )
-            if _canonical_quantization(backend_ftype) != _canonical_quantization(
-                settings.gguf_quantization
-            ):
-                raise StartupValidationError(
-                    "backend model quantization does not match configured "
-                    "gguf_quantization"
-                )
+                backend_ftype = metadata.get("ftype")
+                if not isinstance(backend_ftype, str) or not backend_ftype.strip():
+                    raise StartupValidationError(
+                        "backend /v1/models did not expose model quantization"
+                    )
+                configured_quantization = settings.gguf_quantization
+                if configured_quantization is None:
+                    raise StartupValidationError(
+                        "configured GGUF quantization is missing"
+                    )
+                if _canonical_quantization(backend_ftype) != _canonical_quantization(
+                    configured_quantization
+                ):
+                    raise StartupValidationError(
+                        "backend model quantization does not match configured "
+                        "gguf_quantization"
+                    )
 
             props_response = await _request(
                 client,
@@ -253,36 +262,38 @@ async def validate_backend_deployment(
             )
             _require_success(props_response, "/props")
             props = _json_object(props_response, "/props")
-            if props.get("build_info") != settings.backend_build:
-                raise StartupValidationError(
-                    "backend build does not match configured backend_build"
+            if validate_identity:
+                if props.get("build_info") != settings.backend_build:
+                    raise StartupValidationError(
+                        "backend build does not match configured backend_build"
+                    )
+                if props.get("model_path") != settings.backend_model_path:
+                    raise StartupValidationError(
+                        "backend model path does not match configured "
+                        "backend_model_path"
+                    )
+                generation_settings = props.get("default_generation_settings")
+                if not isinstance(generation_settings, dict):
+                    raise StartupValidationError(
+                        "backend /props omitted default generation settings"
+                    )
+                context_capacity = _positive_integer(
+                    generation_settings.get("n_ctx"),
+                    "backend /props returned an invalid effective context capacity",
                 )
-            if props.get("model_path") != settings.backend_model_path:
-                raise StartupValidationError(
-                    "backend model path does not match configured backend_model_path"
+                total_slots = _positive_integer(
+                    props.get("total_slots"),
+                    "backend /props returned an invalid slot capacity",
                 )
-            generation_settings = props.get("default_generation_settings")
-            if not isinstance(generation_settings, dict):
-                raise StartupValidationError(
-                    "backend /props omitted default generation settings"
-                )
-            context_capacity = _positive_integer(
-                generation_settings.get("n_ctx"),
-                "backend /props returned an invalid effective context capacity",
-            )
-            total_slots = _positive_integer(
-                props.get("total_slots"),
-                "backend /props returned an invalid slot capacity",
-            )
-            if min(context_capacity, training_context) < settings.context_capacity:
-                raise StartupValidationError(
-                    "backend effective context capacity is smaller than configured "
-                    "context_capacity"
-                )
-            if total_slots < settings.backend_slots:
-                raise StartupValidationError(
-                    "backend slot capacity is smaller than configured backend_slots"
-                )
+                if min(context_capacity, training_context) < settings.context_capacity:
+                    raise StartupValidationError(
+                        "backend effective context capacity is smaller than configured "
+                        "context_capacity"
+                    )
+                if total_slots < settings.backend_slots:
+                    raise StartupValidationError(
+                        "backend slot capacity is smaller than configured backend_slots"
+                    )
 
             try:
                 fixture = runtime.readiness_fixture()
@@ -366,9 +377,10 @@ async def validate_backend_deployment(
             _require_success(completion_response, "/completion")
             completion_body = _json_object(completion_response, "/completion")
             try:
-                parsed = parse_backend_row(
+                parse_backend_row(
                     completion_body,
                     fixture.label_token_ids[: fixture.row.option_count],
+                    expected_input_tokens=len(fixture.row.token_ids),
                     expected_probability_coverage=(
                         settings.maximum_probability_coverage
                     ),
@@ -396,14 +408,6 @@ async def validate_backend_deployment(
                     "backend /completion probability or counter contract is "
                     "incompatible"
                 ) from None
-            if (
-                parsed.input_tokens != len(fixture.row.token_ids)
-                or parsed.output_tokens != 1
-            ):
-                raise StartupValidationError(
-                    "backend counters do not represent uncached prompt and "
-                    "generated work"
-                )
     except TimeoutError:
         raise StartupValidationError(
             "backend startup checks exceeded startup_probe_timeout_seconds"

@@ -7,6 +7,7 @@ from pathlib import Path
 import httpx
 import pytest
 from pydantic import ValidationError
+from transformers import AutoTokenizer
 
 from decider_service.app import create_app
 from decider_service.config import INVALID_PROBE_CREDENTIAL
@@ -45,6 +46,30 @@ def test_quantization_normalization_uses_exact_llama_ftype_aliases(
     canonical: str,
 ) -> None:
     assert _canonical_quantization(descriptor) == canonical
+
+
+@pytest.mark.anyio
+async def test_tokenizer_probe_matches_backend_parse_special_semantics(
+    metadata_directory: Path,
+) -> None:
+    tokenizer = AutoTokenizer.from_pretrained(
+        metadata_directory,
+        local_files_only=True,
+    )
+    tokenizer.add_special_tokens(
+        {"additional_special_tokens": ["<|readiness_special|>"]}
+    )
+    tokenizer.split_special_tokens = True
+    tokenizer.save_pretrained(metadata_directory)
+    write_test_manifest(metadata_directory)
+    backend = ControlledBackend(metadata_directory)
+    app = create_app(
+        configured_settings(metadata_directory),
+        backend_transport=backend.transport(),
+    )
+
+    async with app.router.lifespan_context(app):
+        assert app.state.backend_capabilities.vocabulary_size == len(tokenizer)
 
 
 @pytest.mark.anyio
@@ -113,6 +138,66 @@ async def test_startup_verifies_backend_before_serving_inference(
         for request in backend.requests
         if request.url.path == "/tokenize"
     )
+
+
+@pytest.mark.anyio
+async def test_loopback_manual_run_skips_identity_but_keeps_functional_probes(
+    metadata_directory: Path,
+) -> None:
+    (metadata_directory / "deployment-manifest.json").unlink()
+    backend = ControlledBackend(metadata_directory)
+
+    settings = configured_settings(
+        metadata_directory,
+        backend_build=None,
+        backend_model_id=None,
+        backend_model_path=None,
+        gguf_revision=None,
+        gguf_quantization=None,
+        metadata_revision=None,
+        skip_deployment_identity_validation=True,
+    )
+    app = create_app(
+        settings,
+        backend_transport=backend.transport(),
+    )
+
+    async with app.router.lifespan_context(app):
+        capabilities = app.state.backend_capabilities
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            catalog_response = await client.get(
+                "/v1/models",
+                headers={"Authorization": f"Bearer {PROBE_KEY}"},
+            )
+
+    assert capabilities.vocabulary_size == 703
+    assert capabilities.context_capacity == settings.context_capacity
+    assert (
+        capabilities.maximum_probability_coverage
+        == settings.maximum_probability_coverage
+    )
+    assert capabilities.full_vocabulary_probability_coverage is False
+    probed_paths = {request.url.path for request in backend.requests}
+    assert {
+        "/health",
+        "/v1/models",
+        "/props",
+        "/detokenize",
+        "/tokenize",
+        "/completion",
+    } <= probed_paths
+    for path in ("/v1/models", "/completion"):
+        authorization_values = {
+            request.headers.get("Authorization")
+            for request in backend.requests
+            if request.url.path == path
+        }
+        assert f"Bearer {INVALID_PROBE_CREDENTIAL}" in authorization_values
+        assert f"Bearer {PROBE_KEY}" in authorization_values
+    assert catalog_response.status_code == 200
 
 
 async def assert_startup_fails(

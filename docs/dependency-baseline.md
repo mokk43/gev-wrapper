@@ -15,18 +15,21 @@ The compatible official metadata baseline is
 `Mapika/decider-4b-GGUF@b79f09d9ba7837f1b744295ea267b55d08e958ec`,
 which contains the tokenizer and `decider_config.json` for model source
 `Mapika/decider-4b@eb5fbdfc9448473ec25e399882912863afbdb70e`.
-Operators must still configure the exact metadata revision, GGUF revision, and
-quantization that match their running backend. The pin above does not assert
-that the user-supplied local backend serves that artifact.
+Provenance-validating operators must still configure the exact metadata
+revision, GGUF revision, and quantization that match their running backend. The
+pin above does not assert that the user-supplied local backend serves that
+artifact.
 
-Startup requires a `deployment-manifest.json` beside the tokenizer and Decider
-configuration. It hashes every local metadata file, records the matching GGUF,
-metadata, dependency, configuration, model, and prompt-layout identities, and
-is compared with explicit environment configuration. Backend `/v1/models` and
-`/props` checks then bind that declaration to the selected llama.cpp model
-alias, path, and build. The backend API cannot independently prove a GGUF
-content digest, so final operational verification must retain the deployment
-provenance that produced the configured path and alias.
+Normal startup requires a `deployment-manifest.json` beside the tokenizer and
+Decider configuration. It hashes every local metadata file, records the matching
+GGUF, metadata, dependency, configuration, model, and prompt-layout identities,
+and is compared with explicit environment configuration. Backend `/v1/models`
+and `/props` checks then bind that declaration to the selected llama.cpp model
+alias, path, and build. The loopback-only manual identity-bypass mode omits this
+manifest and those identity comparisons while retaining health, authentication,
+tokenizer, probability, and counter probes. The backend API cannot independently
+prove a GGUF content digest, so final operational verification must retain the
+deployment provenance that produced the configured path and alias.
 
 The official TypeSafe JavaScript interoperability baseline is documented next
 to the captured contract in [`contracts/README.md`](../contracts/README.md).

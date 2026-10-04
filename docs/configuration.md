@@ -5,6 +5,10 @@ operator inputs have no defaults because the running llama.cpp artifact and
 capacity have not been verified. Secret values must be supplied at runtime,
 not committed.
 
+The six deployment-identity values for backend build, model ID, model path,
+GGUF revision, GGUF quantization, and metadata revision are optional only in the
+loopback manual mode described below. All other required inputs remain required.
+
 ## Required inputs
 
 | Variable | Meaning |
@@ -27,7 +31,7 @@ not committed.
 | `DECIDER_MAX_QUESTIONS` | Maximum questions per `/v1/systemone` request. |
 | `DECIDER_MAX_OPTIONS` | Maximum alternatives per question, from 2 through Decider's limit of 255. |
 | `DECIDER_MAXIMUM_PROBABILITY_COVERAGE` | Largest supported llama.cpp `n_probs` value. Startup probes this exact bound. Set it to the vocabulary size only when the selected build supports full-vocabulary probability output. |
-| `DECIDER_OPERATOR_PROBE_API_KEY` | Backend credential used only for bounded startup checks. A public request presenting this value is rejected before backend work, and it never becomes a runtime caller fallback. |
+| `DECIDER_OPERATOR_PROBE_API_KEY` | Backend credential used for bounded startup checks. Normally rejected at the public boundary; the loopback manual identity-bypass mode may reuse it only as an explicit caller credential. It never becomes an implicit runtime fallback. |
 
 ## Defaults and optional inputs
 
@@ -41,6 +45,7 @@ not committed.
 | `DECIDER_STARTUP_PROBE_ATTEMPTS` | `3` | Maximum readiness attempts against `GET /health`. |
 | `DECIDER_STARTUP_PROBE_TIMEOUT_SECONDS` | `30` | Whole deadline for all startup compatibility checks. |
 | `DECIDER_STARTUP_TOKENIZER_PROBE_CHUNK_SIZE` | `4096` | Token IDs per `/detokenize` request while comparing the complete local and backend vocabularies. Accepted range: 1 through 8192. |
+| `DECIDER_SKIP_DEPLOYMENT_IDENTITY_VALIDATION` | `false` | For a manual loopback run, skip artifact-manifest hashes and backend identity, build, path, quantization, context, and slot comparisons. Functional remote probes still run. Rejected when `DECIDER_BIND_HOST` is not loopback. |
 
 ## Complete environment example
 
@@ -83,8 +88,26 @@ coordination. The canonical [operation and verification guide](verification.md)
 provides the validation, single-worker launch, authentication, and graceful
 shutdown procedure.
 
+For a manual loopback run against an already-running backend, provide the
+runtime settings, local tokenizer/config directory, and a backend-accepted probe
+key. The identity-only variables may be omitted:
+
+```shell
+export DECIDER_SKIP_DEPLOYMENT_IDENTITY_VALIDATION='true'
+export DECIDER_OPERATOR_PROBE_API_KEY='llama5080'
+uv run decider-service
+```
+
+This mode does not require `deployment-manifest.json` or the six identity
+settings: backend build, model ID, model path, GGUF revision, GGUF quantization,
+and metadata revision. It still runs remote health, authentication, tokenizer,
+probability, and counter probes, and validates every runtime backend response.
+It cannot be used with a non-loopback `DECIDER_BIND_HOST`. On loopback, the
+probe key may also be supplied as a caller key for manual requests.
+
 ## Deployment manifest
 
+Outside the loopback manual identity-bypass mode,
 `DECIDER_METADATA_DIRECTORY` must contain `deployment-manifest.json`. The
 manifest pins the local files and binds them to the configured deployment:
 
@@ -107,15 +130,16 @@ manifest pins the local files and binds them to the configured deployment:
 
 `files` must list every regular file below the metadata directory except the
 manifest itself, using relative paths and lowercase SHA-256 digests. Startup
-rejects missing, extra, or changed files. `decider_config.json` must explicitly
-set `version`, `temperature`, `neutralize_none`, and `isolated_levels`; upstream
-defaults are not accepted as deployment calibration. The manifest records the
-resolved `plain` or `chat` prompt layout, including when older official metadata
-expresses `plain` by omitting a layout field.
+normally rejects missing, extra, or changed files. `decider_config.json` must
+explicitly set `version`, `temperature`, `neutralize_none`, and
+`isolated_levels`; upstream defaults are not accepted as deployment calibration.
+The manifest records the resolved `plain` or `chat` prompt layout, including when
+older official metadata expresses `plain` by omitting a layout field.
 
 ## Startup compatibility gate
 
-Application lifespan completes only after all checks pass. The gate:
+Outside the manual identity-bypass mode, application lifespan completes only
+after the full gate passes:
 
 - loads and hashes the local tokenizer/configuration manifest and verifies the
   installed `decider-ai` version;

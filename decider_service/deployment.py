@@ -42,6 +42,39 @@ def _manifest_files(metadata_directory: Path) -> dict[str, str]:
     }
 
 
+def load_local_runtime_config(metadata_directory: Path) -> dict[str, Any]:
+    config = _read_json_object(
+        metadata_directory / "decider_config.json",
+        "Decider configuration",
+    )
+    required_config_fields = {
+        "version",
+        "temperature",
+        "neutralize_none",
+        "isolated_levels",
+    }
+    missing_fields = sorted(required_config_fields - config.keys())
+    if missing_fields:
+        raise DeploymentValidationError(
+            "decider_config.json must explicitly define " + ", ".join(missing_fields)
+        )
+    if not isinstance(config["version"], str) or not config["version"].strip():
+        raise DeploymentValidationError(
+            "decider_config.json version must be a nonempty string"
+        )
+    if not isinstance(config["neutralize_none"], bool) or not isinstance(
+        config["isolated_levels"], bool
+    ):
+        raise DeploymentValidationError(
+            "decider_config.json neutralize_none and isolated_levels must be booleans"
+        )
+    try:
+        resolve_layout(config)
+    except ValueError as exc:
+        raise DeploymentValidationError(str(exc)) from exc
+    return config
+
+
 def validate_local_deployment(settings: Settings) -> dict[str, Any]:
     metadata_directory = Path(settings.metadata_directory)
     manifest = _read_json_object(
@@ -89,39 +122,12 @@ def validate_local_deployment(settings: Settings) -> dict[str, Any]:
             "local tokenizer/config files do not match the deployment manifest"
         )
 
-    config = _read_json_object(
-        metadata_directory / "decider_config.json",
-        "Decider configuration",
-    )
-    required_config_fields = {
-        "version",
-        "temperature",
-        "neutralize_none",
-        "isolated_levels",
-    }
-    missing_fields = sorted(required_config_fields - config.keys())
-    if missing_fields:
-        raise DeploymentValidationError(
-            "decider_config.json must explicitly define " + ", ".join(missing_fields)
-        )
-    if not isinstance(config["version"], str) or not config["version"].strip():
-        raise DeploymentValidationError(
-            "decider_config.json version must be a nonempty string"
-        )
-    if not isinstance(config["neutralize_none"], bool) or not isinstance(
-        config["isolated_levels"], bool
-    ):
-        raise DeploymentValidationError(
-            "decider_config.json neutralize_none and isolated_levels must be booleans"
-        )
+    config = load_local_runtime_config(metadata_directory)
     if manifest.get("decider_config_version") != config["version"]:
         raise DeploymentValidationError(
             "deployment manifest Decider config version does not match metadata"
         )
-    try:
-        prompt_layout = resolve_layout(config)
-    except ValueError as exc:
-        raise DeploymentValidationError(str(exc)) from exc
+    prompt_layout = resolve_layout(config)
     if manifest.get("prompt_layout") != prompt_layout:
         raise DeploymentValidationError(
             "deployment manifest prompt layout does not match Decider metadata"

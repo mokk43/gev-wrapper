@@ -126,7 +126,8 @@ def assert_failure_was_logged(
 def completion_response(
     probabilities: dict[int, float],
     *,
-    input_tokens: int = 11,
+    request: httpx.Request | None = None,
+    input_tokens: int | None = None,
     output_tokens: int = 1,
     cached_tokens: int | None = None,
     reused_tokens: int = 0,
@@ -134,6 +135,15 @@ def completion_response(
     coverage: int = 256,
     excluded_token_ids: tuple[int, ...] = (),
 ) -> httpx.Response:
+    if input_tokens is None:
+        if request is None:
+            input_tokens = 11
+        else:
+            request_body: dict[str, Any] = json.loads(request.content)
+            prompt = request_body["prompt"]
+            if not isinstance(prompt, list):
+                raise ValueError("completion prompt must be a token-id list")
+            input_tokens = len(prompt)
     covered_token_ids = set(probabilities) | set(excluded_token_ids)
     filler_token_ids = (
         token_id
@@ -236,16 +246,11 @@ class ControlledBackend:
             )
         if request.url.path == "/tokenize":
             body = json.loads(request.content)
-            backend_tokenizer = self.tokenizer.backend_tokenizer
-            previous_parse_special = backend_tokenizer.encode_special_tokens
-            try:
-                backend_tokenizer.encode_special_tokens = body["parse_special"]
-                tokens = self.tokenizer.encode(
-                    body["content"],
-                    add_special_tokens=body["add_special"],
-                )
-            finally:
-                backend_tokenizer.encode_special_tokens = previous_parse_special
+            tokens = self.tokenizer.encode(
+                body["content"],
+                add_special_tokens=body["add_special"],
+                split_special_tokens=not body["parse_special"],
+            )
             return httpx.Response(200, json={"tokens": tokens})
         if request.url.path == "/detokenize":
             body = json.loads(request.content)

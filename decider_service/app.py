@@ -154,9 +154,17 @@ class RequestIdentifierMiddleware:
 
 
 class CallerAuthenticationMiddleware:
-    def __init__(self, app: ASGIApp, operator_probe_api_key: str) -> None:
+    def __init__(
+        self,
+        app: ASGIApp,
+        operator_probe_api_key: str | None,
+    ) -> None:
         self._app = app
-        self._operator_probe_api_key = operator_probe_api_key.encode("utf-8")
+        self._operator_probe_api_key = (
+            operator_probe_api_key.encode("utf-8")
+            if operator_probe_api_key is not None
+            else None
+        )
 
     async def __call__(
         self,
@@ -178,7 +186,10 @@ class CallerAuthenticationMiddleware:
             if len(authorization_values) == 1
             else None
         )
-        if match is None or match.group(1) == self._operator_probe_api_key:
+        if match is None or (
+            self._operator_probe_api_key is not None
+            and match.group(1) == self._operator_probe_api_key
+        ):
             _log_scope_failure(scope, 401, "caller_authentication")
             response = JSONResponse(
                 status_code=401,
@@ -350,10 +361,17 @@ def create_app(
                         lambda: DecisionRuntime(settings)
                     )
                 )
+                if settings.skip_deployment_identity_validation:
+                    _LOGGER.warning(
+                        "deployment identity validation skipped for loopback manual run"
+                    )
                 app.state.backend_capabilities = await validate_backend_deployment(
                     settings,
                     app.state.decision_runtime,
                     backend_client,
+                    validate_identity=(
+                        not settings.skip_deployment_identity_validation
+                    ),
                 )
                 yield
             finally:
@@ -367,7 +385,11 @@ def create_app(
     )
     app.add_middleware(
         CallerAuthenticationMiddleware,
-        operator_probe_api_key=settings.operator_probe_api_key.get_secret_value(),
+        operator_probe_api_key=(
+            None
+            if settings.skip_deployment_identity_validation
+            else settings.operator_probe_api_key.get_secret_value()
+        ),
     )
     app.add_middleware(RequestIdentifierMiddleware)
 

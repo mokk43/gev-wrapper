@@ -24,7 +24,9 @@ bearer credentials and validate them through the configured backend without
 installing credentials on the shared client. Public failures carry request IDs
 and use sanitized bodies and operational logs. Loopback remains the default;
 an explicit network bind is accepted only behind the same mandatory startup
-authentication gate. No live selected deployment has been verified, so the
+authentication gate. An explicit loopback-only manual mode may skip deployment
+identity comparisons while retaining functional remote probes and runtime
+response validation. No live selected deployment has been verified, so the
 service is not production-ready.
 
 ## Install and operate
@@ -35,9 +37,10 @@ Install the locked environment:
 uv sync --python 3.12.5 --locked
 ```
 
-Create the pinned `deployment-manifest.json` and export the complete environment
-described in the [configuration reference](docs/configuration.md). Validate the
-environment, then start exactly one service worker:
+For verified operation, create the pinned `deployment-manifest.json` and export
+the complete environment described in the
+[configuration reference](docs/configuration.md). Validate the environment,
+then start exactly one service worker:
 
 ```shell
 uv run decider-service --validate-config
@@ -47,9 +50,11 @@ uv run decider-service
 `--validate-config` checks environment parsing only. Starting the application
 runs the bounded backend compatibility gate and fails startup with a sanitized,
 actionable diagnostic when the deployment is unavailable or incompatible. The
-entry point intentionally provides no worker-count option. Do not place it
-behind a process manager that starts multiple workers; every process would own
-independent admission and backend-slot limits.
+loopback-only `DECIDER_SKIP_DEPLOYMENT_IDENTITY_VALIDATION=true` override skips
+artifact identity comparisons for manual development while retaining functional
+remote probes. The entry point intentionally provides no worker-count option.
+Do not place it behind a process manager that starts multiple workers; every
+process would own independent admission and backend-slot limits.
 
 The service is pinned to CPython 3.12.5 and `decider-ai==1.8.1`. It loads only
 matching tokenizer/configuration metadata. Model weights remain on the external
@@ -89,9 +94,11 @@ curl http://127.0.0.1:8000/v1/systemone \
 ```
 
 The response maps native `tokens_evaluated` and `tokens_predicted` counters to
-`usage.input_tokens` and `usage.output_tokens`. Startup verifies their uncached
-one-row semantics against the selected build; mock-backed tests establish
-request-local summing. When a valid response omits a required option token ID,
+`usage.input_tokens` and `usage.output_tokens`. Normal startup verifies their
+uncached one-row semantics against the selected build; manual identity-bypass
+startup retains the counter probe without the build comparison. Mock-backed
+tests establish request-local summing. When a valid response omits a required
+option token ID,
 the row retries from 256 with doubled probability coverage, clamping the final
 attempt to the readiness-verified maximum. Retries use the same backend slot
 limit and whole-request deadline. Successful usage includes the counters from
@@ -123,10 +130,11 @@ credential are recorded in the [service configuration requirements](docs/service
 The 2026-10-04 direct checks and their limits are recorded in the
 [verification record](docs/verification.md); the backend was reachable and its
 native probability and uncached-work counters were verified directly, but no
-selected deployment has passed the complete startup gate. Each service start verifies
-the configured deployment before accepting traffic. Decision requests require
-TypeSafe-format bearer credentials, forwarded to the configured backend per
-request and never installed on the shared client. Model-catalog requests
+selected deployment has passed the complete startup gate. Normal service starts
+verify the configured deployment before accepting traffic; manual
+identity-bypass starts retain only the documented functional probes. Decision
+requests require TypeSafe-format bearer credentials, forwarded to the configured
+backend per request and never installed on the shared client. Model-catalog requests
 validate the caller credential through the backend catalog before returning
 the configured public metadata. Preparation-only decisions use the same catalog
 validation because they perform no inference call. Backend 401 and 403
@@ -136,7 +144,8 @@ Every public response includes `x-typesafe-request-id`; failure logs retain that
 identifier, status, and a fixed category without request bodies, State, prompts,
 credentials, upstream bodies, or exception text. Startup probe credentials are
 rejected at the public boundary and cannot serve as runtime authentication
-fallback.
+fallback, except as an explicit caller credential in the loopback-only manual
+identity-bypass mode.
 
 ## References
 

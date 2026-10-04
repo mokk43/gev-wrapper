@@ -198,7 +198,10 @@ async def run() -> None:
         def runtime_backend(request: httpx.Request) -> httpx.Response:
             if request.headers.get("authorization") == f"Bearer {REJECTED_KEY}":
                 return httpx.Response(403, json={"error": "rejected test credential"})
-            return completion_response({1: 0.1, 2: 0.9})
+            return completion_response(
+                {1: 0.1, 2: 0.9},
+                request=request if request.url.path == "/completion" else None,
+            )
 
         backend = ControlledBackend(metadata_directory, runtime_backend)
         service = RecordingApp(

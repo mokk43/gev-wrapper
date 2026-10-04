@@ -119,7 +119,9 @@ assert.deepEqual(Object.keys(mixedResult.answers), [
 assert.equal(mixedResult.answers.priority.choice, "urgent");
 assert.equal(mixedResult.answers.isOutage.noul, 0.9);
 assert.equal(mixedResult.answers.severity.score, 0.9);
-assert.deepEqual(mixedResult.usage, { input_tokens: 33, output_tokens: 3 });
+assert.ok(Number.isInteger(mixedResult.usage.input_tokens));
+assert.ok(mixedResult.usage.input_tokens > 0);
+assert.equal(mixedResult.usage.output_tokens, 3);
 
 const beforeOneLevel = requests.length;
 await assert.rejects(

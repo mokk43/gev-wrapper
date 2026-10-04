@@ -88,7 +88,7 @@ The accepted service design owns technical requirements. The ordered work packag
 - Start with one worker and a global backend evaluation limit shared by callers, rows, and retries. Bound admitted work as well as active evaluations; queue/admission capacities are operator-configured.
 - Apply the accepted 60-second deadline across admission, preparation, evaluation, retries, and assembly. Derive transport timeouts from remaining budget.
 - Cancel pending tasks and close outstanding client requests on expiry or disconnect where supported; stop launching further rows. Do not equate connection closure with confirmed backend cancellation.
-- Close the shared client and managed tasks on shutdown. Prevent inference traffic until configuration and backend capability validation succeeds.
+- Close the shared client and managed tasks on shutdown. In normal operation, prevent inference traffic until configuration and backend capability validation succeeds. An explicit loopback-only manual mode may omit artifact identity checks while retaining health, authentication, tokenizer, probability, and counter probes.
 - Complete when concurrent callers cannot exceed limits, overload is bounded, whole-request timeout covers queueing and multiple evaluations, and shutdown/cancellation release service resources. The next work package must verify that coverage retries use these same controls.
 
 ### 5. Make probability coverage and accounting reliable
@@ -100,7 +100,7 @@ The accepted service design owns technical requirements. The ordered work packag
 
 ### 6. Finish the public operational boundary
 
-- Bind to loopback by default; require TypeSafe-format caller bearer credentials on real-user requests and forward them only to the configured backend. Keep authorization local to each request and retry, with no shared-client mutation or runtime fallback to development/startup probe keys. Verify authenticated behavior for both public endpoints against the chosen backend.
+- Bind to loopback by default; require TypeSafe-format caller bearer credentials on real-user requests and forward them only to the configured backend. Keep authorization local to each request and retry, with no shared-client mutation or implicit runtime fallback to development/startup probe keys. The loopback-only manual identity-bypass mode may explicitly reuse its probe key as the caller key. Verify authenticated behavior for both public endpoints against the chosen backend.
 - Return all answers or an error using the accepted validation/backend/unavailable/deadline status mapping. Sanitize public diagnostics and provide request identifiers without logging State, prompts, or credentials.
 - Treat rejected forwarded caller keys as public authentication failures, while failed startup probe credentials are operator/readiness problems. Verify authentication statuses and non-validation error bodies against the pinned clients and backend instead of inventing hosted-platform fidelity.
 - Complete when exposure, caller-key forwarding and isolation, startup/runtime credential separation, errors, and log redaction pass public behavior checks.

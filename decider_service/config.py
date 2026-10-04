@@ -43,13 +43,13 @@ class Settings(BaseSettings):
     )
 
     backend_url: AnyHttpUrl
-    backend_build: NonemptyString
-    backend_model_id: NonemptyString
-    backend_model_path: NonemptyString
-    gguf_revision: NonemptyString
-    gguf_quantization: NonemptyString
+    backend_build: NonemptyString | None = None
+    backend_model_id: NonemptyString | None = None
+    backend_model_path: NonemptyString | None = None
+    gguf_revision: NonemptyString | None = None
+    gguf_quantization: NonemptyString | None = None
     metadata_directory: DirectoryPath
-    metadata_revision: NonemptyString
+    metadata_revision: NonemptyString | None = None
 
     model_name: NonemptyString
     model_description: NonemptyString
@@ -72,6 +72,7 @@ class Settings(BaseSettings):
     startup_probe_attempts: PositiveInt = 3
     startup_probe_timeout_seconds: PositiveFloat = 30.0
     startup_tokenizer_probe_chunk_size: int = Field(default=4096, ge=1, le=8192)
+    skip_deployment_identity_validation: bool = False
 
     @field_validator("model_aliases", mode="before")
     @classmethod
@@ -84,7 +85,9 @@ class Settings(BaseSettings):
 
     @field_validator("gguf_revision", "metadata_revision")
     @classmethod
-    def revision_is_immutable(cls, value: str) -> str:
+    def revision_is_immutable(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         if IMMUTABLE_REVISION.fullmatch(value) is None:
             raise ValueError("must identify an immutable revision")
         return value
@@ -98,6 +101,29 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def configuration_is_consistent(self) -> Settings:
+        if (
+            self.skip_deployment_identity_validation
+            and not self.bind_host.is_loopback
+        ):
+            raise ValueError(
+                "skip_deployment_identity_validation requires a loopback bind_host"
+            )
+        identity_values = {
+            "backend_build": self.backend_build,
+            "backend_model_id": self.backend_model_id,
+            "backend_model_path": self.backend_model_path,
+            "gguf_revision": self.gguf_revision,
+            "gguf_quantization": self.gguf_quantization,
+            "metadata_revision": self.metadata_revision,
+        }
+        if not self.skip_deployment_identity_validation:
+            missing = sorted(
+                name for name, value in identity_values.items() if value is None
+            )
+            if missing:
+                raise ValueError(
+                    "deployment identity settings are required: " + ", ".join(missing)
+                )
         if not self.operator_probe_api_key.get_secret_value().strip():
             raise ValueError("operator_probe_api_key must not be empty")
         if len(set(self.model_aliases)) != len(self.model_aliases):

@@ -117,6 +117,23 @@ def multi_row_choice_request_payload() -> dict[str, Any]:
     return payload
 
 
+def submitted_prompt_tokens(request: httpx.Request) -> int:
+    prompt = json.loads(request.content)["prompt"]
+    assert isinstance(prompt, list)
+    return len(prompt)
+
+
+def submitted_prompt_tokens_for(
+    requests: list[httpx.Request],
+    credential: str | None = None,
+) -> int:
+    return sum(
+        submitted_prompt_tokens(request)
+        for request in requests
+        if credential is None or request.headers["Authorization"] == credential
+    )
+
+
 @pytest.mark.anyio
 async def test_choice_is_evaluated_through_the_public_http_boundary(
     metadata_directory: Path,
@@ -125,7 +142,7 @@ async def test_choice_is_evaluated_through_the_public_http_boundary(
 
     async def backend(request: httpx.Request) -> httpx.Response:
         backend_requests.append(request)
-        return completion_response({1: 0.2, 2: 0.8})
+        return completion_response({1: 0.2, 2: 0.8}, request=request)
 
     app = create_app(
         configured_settings(metadata_directory),
@@ -166,7 +183,10 @@ async def test_choice_is_evaluated_through_the_public_http_boundary(
                 "probabilities": {"routine": 0.2, "urgent": 0.8},
             }
         },
-        "usage": {"input_tokens": 11, "output_tokens": 1},
+        "usage": {
+            "input_tokens": submitted_prompt_tokens_for(backend_requests),
+            "output_tokens": 1,
+        },
     }
     assert len(backend_requests) == 1
     backend_request = backend_requests[0]
@@ -199,8 +219,8 @@ async def test_choice_is_evaluated_through_the_public_http_boundary(
 async def test_choice_accepts_native_llama_cpp_probability_field(
     metadata_directory: Path,
 ) -> None:
-    def backend(_request: httpx.Request) -> httpx.Response:
-        body = completion_response({1: 0.2, 2: 0.8}).json()
+    def backend(request: httpx.Request) -> httpx.Response:
+        body = completion_response({1: 0.2, 2: 0.8}, request=request).json()
         return httpx.Response(200, json=body)
 
     app = create_app(
@@ -230,8 +250,44 @@ async def test_choice_accepts_native_llama_cpp_probability_field(
 async def test_runtime_rejects_reused_prompt_work(
     metadata_directory: Path,
 ) -> None:
-    def backend(_request: httpx.Request) -> httpx.Response:
-        return completion_response({1: 0.2, 2: 0.8}, reused_tokens=1)
+    def backend(request: httpx.Request) -> httpx.Response:
+        return completion_response(
+            {1: 0.2, 2: 0.8},
+            request=request,
+            reused_tokens=1,
+        )
+
+    app = create_app(
+        configured_settings(metadata_directory),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
+    )
+
+    async with (
+        app.router.lifespan_context(app),
+        service_client(app) as client,
+    ):
+        response = await client.post(
+            "/v1/systemone",
+            headers={"Authorization": "Bearer caller-key"},
+            json=choice_request_payload(),
+        )
+
+    assert response.status_code == 502
+    assert response.json() == {
+        "detail": "Backend response did not satisfy the inference contract."
+    }
+
+
+@pytest.mark.anyio
+async def test_runtime_rejects_prompt_count_that_differs_from_submitted_tokens(
+    metadata_directory: Path,
+) -> None:
+    def backend(request: httpx.Request) -> httpx.Response:
+        prompt_length = len(json.loads(request.content)["prompt"])
+        return completion_response(
+            {1: 0.2, 2: 0.8},
+            input_tokens=prompt_length + 1,
+        )
 
     app = create_app(
         configured_settings(metadata_directory),
@@ -259,15 +315,17 @@ async def test_missing_option_probabilities_expand_coverage_and_include_retry_us
     metadata_directory: Path,
 ) -> None:
     coverages: list[int] = []
+    prompt_lengths: list[int] = []
 
     def backend(request: httpx.Request) -> httpx.Response:
-        coverage = json.loads(request.content)["n_probs"]
+        request_body = json.loads(request.content)
+        coverage = request_body["n_probs"]
         coverages.append(coverage)
-        attempt = len(coverages)
+        prompt_lengths.append(len(request_body["prompt"]))
         probabilities = {1: 0.4, 2: 0.6} if coverage == 600 else {1: 0.9}
         return completion_response(
             probabilities,
-            input_tokens=attempt * 10,
+            request=request,
             coverage=coverage,
             excluded_token_ids=() if coverage == 600 else (2,),
         )
@@ -298,7 +356,7 @@ async def test_missing_option_probabilities_expand_coverage_and_include_retry_us
         "probabilities": {"urgent": 0.4, "routine": 0.6},
     }
     assert response.json()["usage"] == {
-        "input_tokens": 60,
+        "input_tokens": sum(prompt_lengths),
         "output_tokens": 3,
     }
     assert coverages == [256, 512, 600]
@@ -519,7 +577,10 @@ async def test_noul_is_evaluated_through_the_public_http_boundary(
 
     async def backend(request: httpx.Request) -> httpx.Response:
         backend_requests.append(request)
-        return completion_response({1: 0.123456, 2: 0.876544})
+        return completion_response(
+            {1: 0.123456, 2: 0.876544},
+            request=request,
+        )
 
     app = create_app(
         configured_settings(metadata_directory),
@@ -554,7 +615,10 @@ async def test_noul_is_evaluated_through_the_public_http_boundary(
     assert body == {
         "model": "decider-4b-q4-k-m",
         "answers": {"is_spam": {"type": "noul", "noul": 0.8765}},
-        "usage": {"input_tokens": 11, "output_tokens": 1},
+        "usage": {
+            "input_tokens": submitted_prompt_tokens_for(backend_requests),
+            "output_tokens": 1,
+        },
     }
     assert body["answers"]["is_spam"]["noul"] == pytest.approx(
         0.8765,
@@ -575,7 +639,7 @@ async def test_score_is_evaluated_as_an_expected_level_through_public_http(
         fit_probability = fit_probabilities[len(backend_requests) - 1]
         return completion_response(
             {1: 1.0 - fit_probability, 2: fit_probability},
-            input_tokens=len(backend_requests) * 10,
+            request=request,
         )
 
     app = create_app(
@@ -623,7 +687,10 @@ async def test_score_is_evaluated_as_an_expected_level_through_public_http(
                 "probabilities": {"0": 0.1, "1": 0.3, "2": 0.6},
             }
         },
-        "usage": {"input_tokens": 60, "output_tokens": 3},
+        "usage": {
+            "input_tokens": submitted_prompt_tokens_for(backend_requests),
+            "output_tokens": 3,
+        },
     }
     assert len(backend_requests) == 3
     assert all(
@@ -690,8 +757,8 @@ async def test_one_level_score_authenticates_without_backend_inference(
 async def test_score_accepts_empty_text_instructions(
     metadata_directory: Path,
 ) -> None:
-    def backend(_request: httpx.Request) -> httpx.Response:
-        return completion_response({1: 0.4, 2: 0.6})
+    def backend(request: httpx.Request) -> httpx.Response:
+        return completion_response({1: 0.4, 2: 0.6}, request=request)
 
     app = create_app(
         configured_settings(metadata_directory),
@@ -749,7 +816,7 @@ async def test_mixed_choice_and_nonisolated_score_use_per_type_calibration_once(
         backend_requests.append(request)
         return completion_response(
             {1: 0.81, 2: 0.09},
-            input_tokens=len(backend_requests) * 10,
+            request=request,
         )
 
     app = create_app(
@@ -799,7 +866,10 @@ async def test_mixed_choice_and_nonisolated_score_use_per_type_calibration_once(
                 "probabilities": {"0": 0.75, "1": 0.25},
             },
         },
-        "usage": {"input_tokens": 30, "output_tokens": 2},
+        "usage": {
+            "input_tokens": submitted_prompt_tokens_for(backend_requests),
+            "output_tokens": 2,
+        },
     }
     assert len(backend_requests) == 2
 
@@ -822,10 +892,9 @@ async def test_multiple_choices_apply_temperature_once_and_sum_row_usage(
 
     async def backend(request: httpx.Request) -> httpx.Response:
         backend_requests.append(request)
-        row_number = len(backend_requests)
         return completion_response(
             {1: 0.81, 2: 0.09},
-            input_tokens=row_number * 10,
+            request=request,
         )
 
     app = create_app(
@@ -861,7 +930,10 @@ async def test_multiple_choices_apply_temperature_once_and_sum_row_usage(
 
     assert response.status_code == 200
     body = response.json()
-    assert body["usage"] == {"input_tokens": 30, "output_tokens": 2}
+    assert body["usage"] == {
+        "input_tokens": submitted_prompt_tokens_for(backend_requests),
+        "output_tokens": 2,
+    }
     assert body["answers"] == {
         "priority": {
             "type": "choice",
@@ -903,7 +975,7 @@ async def test_mixed_questions_apply_type_calibration_once_and_sum_usage(
         backend_requests.append(request)
         return completion_response(
             {1: 0.09, 2: 0.81},
-            input_tokens=len(backend_requests) * 10,
+            request=request,
         )
 
     app = create_app(
@@ -946,7 +1018,10 @@ async def test_mixed_questions_apply_type_calibration_once_and_sum_usage(
             },
             "is_spam": {"type": "noul", "noul": 0.75},
         },
-        "usage": {"input_tokens": 30, "output_tokens": 2},
+        "usage": {
+            "input_tokens": submitted_prompt_tokens_for(backend_requests),
+            "output_tokens": 2,
+        },
     }
     assert len(backend_requests) == 2
     assert {request.headers["Authorization"] for request in backend_requests} == {
@@ -975,7 +1050,7 @@ async def test_choice_noul_and_score_share_one_public_request(
         backend_requests.append(request)
         return completion_response(
             {1: 0.09, 2: 0.81},
-            input_tokens=len(backend_requests) * 10,
+            request=request,
         )
 
     app = create_app(
@@ -1037,7 +1112,10 @@ async def test_choice_noul_and_score_share_one_public_request(
     )
     assert body["answers"]["severity"]["score"] == pytest.approx(0.75, abs=1e-2)
     assert body["answers"]["severity"]["confidence"] == pytest.approx(0.5, abs=1e-2)
-    assert body["usage"] == {"input_tokens": 60, "output_tokens": 3}
+    assert body["usage"] == {
+        "input_tokens": submitted_prompt_tokens_for(backend_requests),
+        "output_tokens": 3,
+    }
     assert len(backend_requests) == 3
     assert {request.headers["Authorization"] for request in backend_requests} == {
         "Bearer all-types-key"
@@ -1388,7 +1466,7 @@ async def test_noul_accepts_optional_fields_and_preserves_structured_values(
 
     def backend(request: httpx.Request) -> httpx.Response:
         backend_prompts.append(json.loads(request.content)["prompt"])
-        return completion_response({1: 0.6, 2: 0.4})
+        return completion_response({1: 0.6, 2: 0.4}, request=request)
 
     app = create_app(
         configured_settings(metadata_directory),
@@ -1455,7 +1533,7 @@ async def test_structured_fields_and_omitted_or_null_instructions_are_accepted(
 
     def backend(request: httpx.Request) -> httpx.Response:
         backend_requests.append(request)
-        return completion_response({1: 0.6, 2: 0.4})
+        return completion_response({1: 0.6, 2: 0.4}, request=request)
 
     app = create_app(
         configured_settings(metadata_directory),
@@ -1772,8 +1850,8 @@ async def test_concurrent_noul_callers_keep_results_usage_and_credentials_isolat
         if request.headers["Authorization"] == "Bearer slow-key":
             slow_started.set()
             await release_slow.wait()
-            return completion_response({1: 0.8, 2: 0.2}, input_tokens=13)
-        return completion_response({1: 0.1, 2: 0.9}, input_tokens=17)
+            return completion_response({1: 0.8, 2: 0.2}, request=request)
+        return completion_response({1: 0.1, 2: 0.9}, request=request)
 
     app = create_app(
         configured_settings(metadata_directory),
@@ -1817,12 +1895,18 @@ async def test_concurrent_noul_callers_keep_results_usage_and_credentials_isolat
     assert slow_response.status_code == 200
     assert fast_response.json()["answers"] == {"check": {"type": "noul", "noul": 0.9}}
     assert fast_response.json()["usage"] == {
-        "input_tokens": 17,
+        "input_tokens": submitted_prompt_tokens_for(
+            backend_requests,
+            "Bearer fast-key",
+        ),
         "output_tokens": 1,
     }
     assert slow_response.json()["answers"] == {"check": {"type": "noul", "noul": 0.2}}
     assert slow_response.json()["usage"] == {
-        "input_tokens": 13,
+        "input_tokens": submitted_prompt_tokens_for(
+            backend_requests,
+            "Bearer slow-key",
+        ),
         "output_tokens": 1,
     }
     assert [request.headers["Authorization"] for request in backend_requests] == [
@@ -1843,8 +1927,10 @@ async def test_concurrent_coverage_retries_keep_results_usage_and_keys_isolated(
     slow_started = asyncio.Event()
     release_slow = asyncio.Event()
     attempts: dict[str, list[int]] = {}
+    backend_requests: list[httpx.Request] = []
 
     async def backend(request: httpx.Request) -> httpx.Response:
+        backend_requests.append(request)
         credential = request.headers["Authorization"]
         coverage = json.loads(request.content)["n_probs"]
         attempts.setdefault(credential, []).append(coverage)
@@ -1861,10 +1947,9 @@ async def test_concurrent_coverage_retries_keep_results_usage_and_keys_isolated(
         else:
             probabilities = {1: 0.1, 2: 0.9}
             excluded_token_ids = ()
-        input_tokens = 13 if credential == "Bearer slow-key" else 17
         return completion_response(
             probabilities,
-            input_tokens=input_tokens,
+            request=request,
             coverage=coverage,
             excluded_token_ids=excluded_token_ids,
         )
@@ -1904,11 +1989,17 @@ async def test_concurrent_coverage_retries_keep_results_usage_and_keys_isolated(
         "routine": 0.2,
     }
     assert fast_response.json()["usage"] == {
-        "input_tokens": 34,
+        "input_tokens": submitted_prompt_tokens_for(
+            backend_requests,
+            "Bearer fast-key",
+        ),
         "output_tokens": 2,
     }
     assert slow_response.json()["usage"] == {
-        "input_tokens": 26,
+        "input_tokens": submitted_prompt_tokens_for(
+            backend_requests,
+            "Bearer slow-key",
+        ),
         "output_tokens": 2,
     }
     assert attempts == {
@@ -1936,13 +2027,11 @@ async def test_concurrent_score_callers_keep_rows_results_and_usage_isolated(
                 slow_rows_started.set()
             await release_slow_rows.wait()
             fit_probability = [0.8, 0.2][row_number]
-            input_tokens = 13 + row_number
         else:
             fit_probability = [0.1, 0.9][row_number]
-            input_tokens = 17 + row_number
         return completion_response(
             {1: 1.0 - fit_probability, 2: fit_probability},
-            input_tokens=input_tokens,
+            request=request,
         )
 
     app = create_app(
@@ -1994,7 +2083,10 @@ async def test_concurrent_score_callers_keep_rows_results_and_usage_isolated(
         "probabilities": {"0": 0.1, "1": 0.9},
     }
     assert fast_response.json()["usage"] == {
-        "input_tokens": 35,
+        "input_tokens": submitted_prompt_tokens_for(
+            backend_requests,
+            "Bearer fast-key",
+        ),
         "output_tokens": 2,
     }
     assert slow_response.json()["answers"]["severity"] == {
@@ -2005,7 +2097,10 @@ async def test_concurrent_score_callers_keep_rows_results_and_usage_isolated(
         "probabilities": {"0": 0.8, "1": 0.2},
     }
     assert slow_response.json()["usage"] == {
-        "input_tokens": 27,
+        "input_tokens": submitted_prompt_tokens_for(
+            backend_requests,
+            "Bearer slow-key",
+        ),
         "output_tokens": 2,
     }
     assert rows_by_credential == {"Bearer slow-key": 2, "Bearer fast-key": 2}
@@ -2058,7 +2153,7 @@ async def test_question_is_unchanged_when_independent_questions_are_reordered(
 
     def backend(request: httpx.Request) -> httpx.Response:
         backend_requests.append(request)
-        return completion_response({1: 0.3, 2: 0.7})
+        return completion_response({1: 0.3, 2: 0.7}, request=request)
 
     app = create_app(
         configured_settings(metadata_directory),
@@ -2121,7 +2216,7 @@ async def test_score_is_unchanged_when_a_choice_is_added_or_reordered(
 
     def backend(request: httpx.Request) -> httpx.Response:
         backend_requests.append(request)
-        return completion_response({1: 0.3, 2: 0.7})
+        return completion_response({1: 0.3, 2: 0.7}, request=request)
 
     app = create_app(
         configured_settings(metadata_directory),
@@ -2186,7 +2281,7 @@ async def test_neutralized_option_maps_back_to_the_requested_label(
 
     def backend(request: httpx.Request) -> httpx.Response:
         backend_prompts.append(json.loads(request.content)["prompt"])
-        return completion_response({1: 0.2, 2: 0.8})
+        return completion_response({1: 0.2, 2: 0.8}, request=request)
 
     app = create_app(
         configured_settings(metadata_directory),

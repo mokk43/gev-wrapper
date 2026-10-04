@@ -174,12 +174,54 @@ def test_configuration_rejects_floating_artifact_revisions(
 
 
 def test_binding_defaults_to_loopback(tmp_path: Path) -> None:
-    assert configured_settings(tmp_path).bind_host.is_loopback
+    settings = configured_settings(tmp_path)
+
+    assert settings.bind_host.is_loopback
+    assert settings.skip_deployment_identity_validation is False
 
 
 def test_configuration_allows_intentional_network_binding(tmp_path: Path) -> None:
     settings = configured_settings(tmp_path, bind_host="0.0.0.0")
     assert str(settings.bind_host) == "0.0.0.0"
+
+
+def test_configuration_allows_skipping_deployment_identity_on_loopback(
+    tmp_path: Path,
+) -> None:
+    settings = configured_settings(
+        tmp_path,
+        backend_build=None,
+        backend_model_id=None,
+        backend_model_path=None,
+        gguf_revision=None,
+        gguf_quantization=None,
+        metadata_revision=None,
+        skip_deployment_identity_validation=True,
+    )
+
+    assert settings.skip_deployment_identity_validation is True
+
+
+def test_configuration_requires_identity_settings_by_default(tmp_path: Path) -> None:
+    with pytest.raises(
+        ValidationError,
+        match="deployment identity settings are required: backend_build",
+    ):
+        configured_settings(tmp_path, backend_build=None)
+
+
+def test_configuration_rejects_skipping_deployment_identity_on_network_bind(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(
+        ValidationError,
+        match="skip_deployment_identity_validation requires a loopback bind_host",
+    ):
+        configured_settings(
+            tmp_path,
+            bind_host="0.0.0.0",
+            skip_deployment_identity_validation=True,
+        )
 
 
 def test_configuration_requires_bounded_admission_for_backend_slots(

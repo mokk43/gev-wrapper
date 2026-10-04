@@ -20,11 +20,13 @@ npm ci
 `package-lock.json` pins `@typesafe-ai/sdk@0.6.0` to the npm registry artifact
 and integrity recorded in the [captured contract](../contracts/README.md).
 
-Create the pinned metadata manifest and export every required variable using
-the [complete environment example](configuration.md#complete-environment-example).
+For verified operation, create the pinned metadata manifest and export every
+required variable using the
+[complete environment example](configuration.md#complete-environment-example).
 Configuration values must describe the already-running llama.cpp deployment;
-the service does not provision it or download weights. Validate parsing, then
-start one worker:
+the service does not provision it or download weights. The loopback manual mode
+may instead use the reduced identity-bypass configuration documented there.
+Validate parsing, then start one worker:
 
 ```shell
 uv run decider-service --validate-config
@@ -34,11 +36,16 @@ uv run decider-service
 Successful process startup means the configured metadata and selected backend
 passed the bounded compatibility gate for build identity, authentication,
 tokenizer agreement, context, probability coverage, token counters, and
-disabled caching. It does not establish prediction equivalence with another
-Decider artifact.
+disabled caching, unless
+`DECIDER_SKIP_DEPLOYMENT_IDENTITY_VALIDATION=true` was explicitly set. That
+loopback-only manual mode omits artifact identity, build, path, quantization,
+context, and slot comparisons while retaining health, authentication,
+tokenizer, probability, and counter probes. It does not establish artifact
+provenance or prediction equivalence with another Decider artifact.
 
 From another shell, use a caller credential, not the operator probe credential,
-to check authentication and the catalog:
+to check authentication and the catalog. The loopback-only manual
+identity-bypass mode may reuse the probe credential as its explicit caller key:
 
 ```shell
 uv run decider-service-check \
@@ -50,17 +57,17 @@ Both public operations require `Authorization: Bearer <CALLER_API_KEY>`. The
 credential is forwarded only to the configured backend for that request.
 Missing or malformed credentials receive 401; a backend-rejected credential
 receives the backend's 401 or 403 status with a sanitized body. There is no
-probe-key or development-key fallback.
+implicit probe-key or development-key fallback.
 
 Stop the foreground process with `Ctrl-C`, or send it `SIGTERM`. Shutdown stops
 new admission, cancels tracked requests, waits for preparation and assembly
 threads already running, and closes the shared HTTP client. Closing the client
 side of an in-flight request does not prove the backend stopped inference.
 
-The launch, public catalog check, and process-signal shutdown commands above
-were not run against a selected deployment on 2026-10-04 because required
-metadata, artifact provenance, and a separate caller key were unavailable.
-The controlled suite exercises
+The full compatibility-gate launch, public catalog check, and process-signal
+shutdown commands above were not run against a selected deployment on
+2026-10-04 because required metadata, artifact provenance, and a separate caller
+key were unavailable. The controlled suite exercises
 the same application startup, authenticated public catalog, request
 cancellation, and shutdown behavior without claiming live compatibility.
 
@@ -174,8 +181,10 @@ backend key with `--rejected-api-key` or
 without one, the script reports that check as unavailable. It does not start
 llama.cpp, create metadata, provision credentials, or download artifacts.
 
-The public caller key must differ from `DECIDER_OPERATOR_PROBE_API_KEY`; the
-service rejects its probe key at the public boundary by design. The only
+For this normal live-verification procedure, the public caller key must differ
+from `DECIDER_OPERATOR_PROBE_API_KEY`; the service rejects its probe key at the
+public boundary. The loopback manual identity-bypass exception is not a selected
+deployment verification. The only
 supplied local key, `llama5080`, is used explicitly by the direct-backend check
 below. No separate caller key was supplied, so it cannot currently drive this
 public smoke procedure when it is also the startup probe credential.
@@ -234,8 +243,8 @@ reused-prompt counter in
 [`server_slot_stats`](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/server-common.cpp).
 The service contract and adapter now validate those native semantics.
 
-No public live smoke run was attempted because the other required deployment
-inputs remain unavailable:
+No full-gate public live smoke run was attempted because the other required
+deployment inputs remain unavailable:
 
 - Complete tokenizer agreement and option-label token IDs; the single `"A"`
   tokenization probe is not sufficient evidence.
@@ -244,8 +253,9 @@ inputs remain unavailable:
   service startup compatibility gate.
 - The character format of an issued live TypeSafe key. The supplied local
   backend test key is not evidence about TypeSafe's issuer.
-- A separate backend-issued runtime caller key. The service cannot use its
-  configured startup probe credential as a public caller fallback.
+- A separate backend-issued runtime caller key for normal operation. Manual
+  identity-bypass mode can reuse the probe key explicitly, but that does not
+  verify normal credential separation.
 - Numerical comparison with a trusted Decider baseline. No trusted baseline,
   fixed comparison corpus, matching artifact identity, or justified tolerance
   was supplied, so GGUF prediction and quantization equivalence are unverified.

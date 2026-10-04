@@ -37,7 +37,10 @@ from decider_service.contracts import (
     StructuredValue,
     SystemOneRequest,
 )
-from decider_service.deployment import validate_local_deployment
+from decider_service.deployment import (
+    load_local_runtime_config,
+    validate_local_deployment,
+)
 
 
 class PublicInputError(Exception):
@@ -210,7 +213,11 @@ def _question_name_for_row(
 class DecisionRuntime:
     def __init__(self, settings: Settings) -> None:
         metadata_directory = Path(settings.metadata_directory)
-        config = validate_local_deployment(settings)
+        config = (
+            load_local_runtime_config(metadata_directory)
+            if settings.skip_deployment_identity_validation
+            else validate_local_deployment(settings)
+        )
 
         tokenizer = AutoTokenizer.from_pretrained(
             metadata_directory,
@@ -289,6 +296,7 @@ class DecisionRuntime:
                     self._tokenizer.encode(
                         content,
                         add_special_tokens=False,
+                        split_special_tokens=False,
                     ),
                 )
             )
@@ -416,6 +424,7 @@ def parse_backend_row(
     body: object,
     required_token_ids: tuple[int, ...],
     *,
+    expected_input_tokens: int | None = None,
     expected_probability_coverage: int | None = None,
     vocabulary_size: int | None = None,
 ) -> BackendRow:
@@ -502,7 +511,8 @@ def parse_backend_row(
     if output_tokens != 1:
         raise BackendContractError("backend returned an unexpected prediction count")
     if (
-        reused_tokens != 0
+        (expected_input_tokens is not None and input_tokens != expected_input_tokens)
+        or reused_tokens != 0
         or processed_tokens != input_tokens
         or cached_tokens != input_tokens
         or predicted_tokens != output_tokens
@@ -569,6 +579,7 @@ async def _evaluate_row(
             result = parse_backend_row(
                 body,
                 label_token_ids[: row.option_count],
+                expected_input_tokens=len(row.token_ids),
                 expected_probability_coverage=probability_coverage,
                 vocabulary_size=coverage_policy.vocabulary_size,
             )

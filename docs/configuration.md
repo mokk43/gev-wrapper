@@ -115,11 +115,11 @@ Every attempt requests matching `n_probs` and `min_keep` values. The response
 must contain exactly one final-slot `probs` element and exactly the requested
 number of `top_logprobs` entries. Each entry must have a unique integer token ID
 within the verified vocabulary and a finite, nonpositive numeric log
-probability. Returned probability mass may not exceed 1 by more than `1e-6`;
-full-vocabulary coverage must sum to 1 within the same absolute tolerance. Only
-a valid response that lacks at least one required option token ID is retried;
-malformed coverage, token IDs, probabilities, or counters fail with a sanitized
-502 response.
+probability. Per the accepted service design, returned probability mass may not
+exceed 1 by more than `1e-6`; full-vocabulary coverage must sum to 1 within the
+same absolute tolerance. Only a valid response that lacks at least one required
+option token ID is retried; malformed coverage, token IDs, probabilities, or
+counters fail with a sanitized 502 response.
 
 Retries remain inside the admitted request. Each attempt acquires capacity from
 the same global backend-slot limit and uses the same whole-request deadline.

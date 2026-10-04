@@ -1,0 +1,12 @@
+{
+  "name": "typesafe-decider-service-sdk-check",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "npm run test:typesafe-sdk",
+    "test:typesafe-sdk": ".venv/bin/python tests/run_typesafe_sdk_interop.py"
+  },
+  "devDependencies": {
+    "@typesafe-ai/sdk": "0.6.0"
+  }
+}

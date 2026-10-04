@@ -896,6 +896,96 @@ async def test_mixed_questions_apply_type_calibration_once_and_sum_usage(
 
 
 @pytest.mark.anyio
+async def test_choice_noul_and_score_share_one_public_request(
+    metadata_directory: Path,
+) -> None:
+    (metadata_directory / "decider_config.json").write_text(
+        json.dumps(
+            {
+                "version": "test",
+                "temperature": 1.0,
+                "temperature_by_type": {"choice": 1.0, "noul": 2.0, "score": 2.0},
+                "neutralize_none": True,
+                "isolated_levels": False,
+            }
+        )
+    )
+    backend_requests: list[httpx.Request] = []
+
+    def backend(request: httpx.Request) -> httpx.Response:
+        backend_requests.append(request)
+        return completion_response(
+            {1: 0.09, 2: 0.81},
+            input_tokens=len(backend_requests) * 10,
+        )
+
+    app = create_app(
+        configured_settings(metadata_directory),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
+    )
+
+    async with (
+        app.router.lifespan_context(app),
+        service_client(app) as client,
+    ):
+        response = await client.post(
+            "/v1/systemone",
+            headers={"Authorization": "Bearer all-types-key"},
+            json={
+                "model": "jev-latest",
+                "state": {"message": "Production is unavailable."},
+                "questions": {
+                    "priority": {
+                        "type": "choice",
+                        "criteria": {"routine": None, "urgent": "Act now"},
+                    },
+                    "is_outage": {
+                        "type": "noul",
+                        "instructions": "Is production unavailable?",
+                    },
+                    "severity": {
+                        "type": "score",
+                        "instructions": "Rate severity.",
+                        "criteria": ["low", {"label": "high"}],
+                    },
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["model"] == "decider-4b-q4-k-m"
+    assert set(body["answers"]) == {"priority", "is_outage", "severity"}
+    assert body["answers"]["priority"]["type"] == "choice"
+    assert body["answers"]["priority"]["choice"] == "urgent"
+    assert body["answers"]["priority"]["probabilities"] == pytest.approx(
+        {"routine": 0.1, "urgent": 0.9},
+        abs=1e-2,
+    )
+    assert body["answers"]["priority"]["confidence"] == pytest.approx(0.8, abs=1e-2)
+    assert body["answers"]["is_outage"] == {
+        "type": "noul",
+        "noul": pytest.approx(0.75, abs=1e-2),
+    }
+    assert body["answers"]["severity"]["type"] == "score"
+    assert body["answers"]["severity"]["legend"] == {
+        "0": "low",
+        "1": {"label": "high"},
+    }
+    assert body["answers"]["severity"]["probabilities"] == pytest.approx(
+        {"0": 0.25, "1": 0.75},
+        abs=1e-2,
+    )
+    assert body["answers"]["severity"]["score"] == pytest.approx(0.75, abs=1e-2)
+    assert body["answers"]["severity"]["confidence"] == pytest.approx(0.5, abs=1e-2)
+    assert body["usage"] == {"input_tokens": 60, "output_tokens": 3}
+    assert len(backend_requests) == 3
+    assert {request.headers["Authorization"] for request in backend_requests} == {
+        "Bearer all-types-key"
+    }
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("payload", "location"),
     [

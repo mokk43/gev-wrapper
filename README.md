@@ -1,6 +1,8 @@
 # TypeSafe-compatible Decider service
 
-An async FastAPI service being built to accept TypeSafe's `/v1/systemone` requests, evaluate them using a remotely served decider-4b GGUF model in llama.cpp, and return TypeSafe-shaped decisions.
+An async FastAPI service that accepts TypeSafe's `/v1/systemone` requests,
+evaluates them using a remotely served decider-4b GGUF model in llama.cpp, and
+returns TypeSafe-shaped decisions.
 
 ## Status
 
@@ -25,17 +27,17 @@ an explicit network bind is accepted only behind the same mandatory startup
 authentication gate. No live selected deployment has been verified, so the
 service is not production-ready.
 
-## Catalog setup
+## Install and operate
 
-Install the locked catalog environment:
+Install the locked environment:
 
 ```shell
 uv sync --python 3.12.5 --locked
 ```
 
-Create the pinned `deployment-manifest.json` described in the
-[configuration reference](docs/configuration.md), set every required variable,
-then validate and run:
+Create the pinned `deployment-manifest.json` and export the complete environment
+described in the [configuration reference](docs/configuration.md). Validate the
+environment, then start exactly one service worker:
 
 ```shell
 uv run decider-service --validate-config
@@ -44,19 +46,19 @@ uv run decider-service
 
 `--validate-config` checks environment parsing only. Starting the application
 runs the bounded backend compatibility gate and fails startup with a sanitized,
-actionable diagnostic when the deployment is unavailable or incompatible.
-
-Check the authenticated public wire response from another shell:
-
-```shell
-uv run decider-service-check \
-  --base-url http://127.0.0.1:8000 \
-  --api-key '<API_KEY>'
-```
+actionable diagnostic when the deployment is unavailable or incompatible. The
+entry point intentionally provides no worker-count option. Do not place it
+behind a process manager that starts multiple workers; every process would own
+independent admission and backend-slot limits.
 
 The service is pinned to CPython 3.12.5 and `decider-ai==1.8.1`. It loads only
 matching tokenizer/configuration metadata. Model weights remain on the external
 llama.cpp backend.
+
+The [operation and verification guide](docs/verification.md) is the canonical
+runbook for authentication checks, graceful shutdown, contract tests, the
+official SDK check, the optional live check, exercised results, and exact
+unavailable deployment evidence.
 
 Submit Choice, Noul, and Score questions with the caller's backend credential:
 
@@ -102,6 +104,7 @@ every coverage attempt.
 - [Domain glossary](CONTEXT.md): the meaning of State, Choice, Noul, Score, Decider, and Jev.
 - [Response identity and accounting decision](docs/adr/0001-report-model-identity-and-backend-work.md): why compatible responses expose the actual model and backend work.
 - [Service configuration](docs/configuration.md): required operator inputs, safe defaults, and alias configuration.
+- [Verification and operation](docs/verification.md): exercised commands, SDK and contract checks, live-check procedure, and unavailable evidence.
 - [Contract and dependency baseline](docs/dependency-baseline.md): pinned revisions, inspected upstream seams, and explicit adaptations.
 - [Captured TypeSafe contract](contracts/README.md): source, hashes, and interoperability client pin.
 - [Agent instructions](AGENTS.md): project scope, document ownership, and working conventions.
@@ -111,14 +114,16 @@ every coverage attempt.
 - [decider_wrapper.py](decider_wrapper.py) initializes a remote-backed subclass of upstream `Decider`, preserving model configuration, prompt layout, and calibration settings.
 - [remote_llamacpp_engine.py](remote_llamacpp_engine.py) is the original synchronous payload/scoring reference. The running service adapts that boundary to async HTTP and request-local accounting.
 
-GGUF weights belong to the external llama.cpp deployment. The planned service needs matching tokenizer and Decider configuration metadata locally; it does not load model weights.
+GGUF weights belong to the external llama.cpp deployment. The service needs matching tokenizer and Decider configuration metadata locally; it does not load model weights.
 
 ## Development and authentication inputs
 
 The user supplied a local decider-4b test backend; its address and test
 credential are recorded in the [service configuration requirements](docs/service-design.md#configuration-and-deployment-inputs).
-No live result is recorded in this repository. Each service start verifies the
-configured deployment before accepting traffic. Decision requests require
+The 2026-10-04 availability attempt and its limits are recorded in the
+[verification record](docs/verification.md); the backend was unavailable, so no
+selected deployment has passed live verification. Each service start verifies
+the configured deployment before accepting traffic. Decision requests require
 TypeSafe-format bearer credentials, forwarded to the configured backend per
 request and never installed on the shared client. Model-catalog requests
 validate the caller credential through the backend catalog before returning

@@ -42,6 +42,47 @@ not committed.
 | `DECIDER_STARTUP_PROBE_TIMEOUT_SECONDS` | `30` | Whole deadline for all startup compatibility checks. |
 | `DECIDER_STARTUP_TOKENIZER_PROBE_CHUNK_SIZE` | `4096` | Token IDs per `/detokenize` request while comparing the complete local and backend vocabularies. Accepted range: 1 through 8192. |
 
+## Complete environment example
+
+The following is a complete single-process environment. It uses the supplied
+local fixture address and probe credential explicitly. Every angle-bracketed
+value remains an unresolved operator input and must be replaced with observed,
+deployment-specific evidence before launch.
+
+```shell
+export DECIDER_BACKEND_URL='http://127.0.0.1:8080'
+export DECIDER_BACKEND_BUILD='<exact GET /props build_info>'
+export DECIDER_BACKEND_MODEL_ID='<exact GET /v1/models model id>'
+export DECIDER_BACKEND_MODEL_PATH='<exact GET /props model_path>'
+export DECIDER_GGUF_REVISION='<immutable GGUF revision or digest>'
+export DECIDER_GGUF_QUANTIZATION='<exact quantization>'
+export DECIDER_METADATA_DIRECTORY='<absolute matching metadata directory>'
+export DECIDER_METADATA_REVISION='<immutable metadata revision>'
+export DECIDER_MODEL_NAME='<truthful public Decider identity>'
+export DECIDER_MODEL_DESCRIPTION='<catalog description>'
+export DECIDER_MODEL_RELEASE_DATE='<actual YYYY-MM-DD release date>'
+export DECIDER_CONTEXT_CAPACITY='<verified effective context capacity>'
+export DECIDER_BACKEND_SLOTS='<verified backend parallel slots>'
+export DECIDER_ADMISSION_CAPACITY='<bounded admitted request count>'
+export DECIDER_MAX_REQUEST_BYTES='<bounded request size>'
+export DECIDER_MAX_QUESTIONS='<bounded question count>'
+export DECIDER_MAX_OPTIONS='<verified option limit, 2 through 255>'
+export DECIDER_MAXIMUM_PROBABILITY_COVERAGE='<verified maximum n_probs>'
+export DECIDER_OPERATOR_PROBE_API_KEY='llama5080'
+```
+
+`llama5080` is only the user-supplied local test credential. It is not a
+production credential, an application default, or a fallback for caller
+requests. Real callers supply their own key in `Authorization: Bearer ...`.
+Keep the safe optional defaults unless deployment evidence justifies changing
+them. In particular, `DECIDER_REQUEST_DEADLINE_SECONDS=60` is an operational
+guardrail, not a measured latency target.
+
+Do not start multiple workers: the service has no cross-process capacity
+coordination. The canonical [operation and verification guide](verification.md)
+provides the validation, single-worker launch, authentication, and graceful
+shutdown procedure.
+
 ## Deployment manifest
 
 `DECIDER_METADATA_DIRECTORY` must contain `deployment-manifest.json`. The
@@ -127,7 +168,9 @@ Deadline or cancellation stops further attempts. On success,
 `usage.input_tokens` and `usage.output_tokens` sum the verified backend counters
 from every attempt, including attempts whose valid coverage omitted required
 option IDs. These runtime guarantees are covered by controlled fixtures; no
-live backend result is recorded in this repository.
+live compatibility claim follows from them. The dated
+[verification record](verification.md) reports the local-backend availability
+attempt separately.
 
 The documented local backend and key are test inputs, not defaults. Both public
 operations require one syntactically valid TypeSafe bearer credential. Model
@@ -152,8 +195,8 @@ Creating the application establishes one shared, lifecycle-managed backend HTTP
 client. Backend evaluations and admitted requests are bounded per process by
 the configured capacities. Controlled fixtures prove gate behavior; they do not
 prove that any actual selected deployment is compatible. Each real service
-start performs the checks against its configured backend, and live results must
-be recorded during final operational verification.
+start performs the checks against its configured backend. Live results belong
+in the [verification record](verification.md), not in configuration claims.
 
 Run one service worker. Each additional worker would create independent
 admission and backend-slot limits; multi-worker operation requires coordinated

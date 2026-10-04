@@ -368,6 +368,48 @@ async def test_supported_full_vocabulary_coverage_recovers_missing_options(
 
 
 @pytest.mark.anyio
+async def test_full_vocabulary_coverage_requires_complete_probability_mass(
+    metadata_directory: Path,
+) -> None:
+    vocabulary_size = len(PreTrainedTokenizerFast.from_pretrained(metadata_directory))
+    coverages: list[int] = []
+
+    def backend(request: httpx.Request) -> httpx.Response:
+        coverage = json.loads(request.content)["n_probs"]
+        coverages.append(coverage)
+        full_vocabulary = coverage == vocabulary_size
+        return completion_response(
+            {1: 0.2, 2: 0.3} if full_vocabulary else {1: 0.9},
+            coverage=coverage,
+            excluded_token_ids=() if full_vocabulary else (2,),
+        )
+
+    app = create_app(
+        configured_settings(
+            metadata_directory,
+            maximum_probability_coverage=vocabulary_size,
+        ),
+        backend_transport=ready_backend_transport(metadata_directory, backend),
+    )
+
+    async with (
+        app.router.lifespan_context(app),
+        service_client(app) as client,
+    ):
+        response = await client.post(
+            "/v1/systemone",
+            headers={"Authorization": "Bearer caller-key"},
+            json=choice_request_payload(),
+        )
+
+    assert response.status_code == 502
+    assert response.json() == {
+        "detail": "Backend response did not satisfy the inference contract."
+    }
+    assert coverages == [256, 512, vocabulary_size]
+
+
+@pytest.mark.anyio
 async def test_exhausted_probability_coverage_returns_no_partial_answers(
     metadata_directory: Path,
 ) -> None:
@@ -1493,6 +1535,7 @@ async def test_malformed_backend_data_returns_a_sanitized_502(
         "multiple_final_slots",
         "nonfinite_probability",
         "positive_log_probability",
+        "excess_probability_mass",
     ],
 )
 async def test_malformed_coverage_attempts_are_not_retried(
@@ -1517,8 +1560,11 @@ async def test_malformed_coverage_attempts_are_not_retried(
             body["probs"].append(body["probs"][0])
         elif malformation == "nonfinite_probability":
             body["probs"][0]["top_logprobs"][0]["logprob"] = float("nan")
-        else:
+        elif malformation == "positive_log_probability":
             body["probs"][0]["top_logprobs"][0]["logprob"] = 1.0
+        else:
+            body["probs"][0]["top_logprobs"][0]["logprob"] = 0.0
+            body["probs"][0]["top_logprobs"][1]["logprob"] = 0.0
         return httpx.Response(
             200,
             content=json.dumps(body, allow_nan=True),

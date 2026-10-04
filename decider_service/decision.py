@@ -95,6 +95,7 @@ class AdmissionCapacityError(Exception):
 
 
 _OffloadResult = TypeVar("_OffloadResult")
+_BACKEND_PROBABILITY_TOLERANCE = 1e-6
 
 
 class DecisionCapacity:
@@ -470,6 +471,23 @@ def parse_backend_row(
                 "backend returned malformed probability data"
             )
         by_token_id[token_id] = float(log_probability)
+
+    probability_mass = math.fsum(
+        math.exp(log_probability) for log_probability in by_token_id.values()
+    )
+    if probability_mass > 1.0 + _BACKEND_PROBABILITY_TOLERANCE or (
+        vocabulary_size is not None
+        and len(by_token_id) == vocabulary_size
+        and not math.isclose(
+            probability_mass,
+            1.0,
+            rel_tol=0.0,
+            abs_tol=_BACKEND_PROBABILITY_TOLERANCE,
+        )
+    ):
+        raise BackendProbabilityDataError(
+            "backend returned an invalid probability distribution"
+        )
 
     input_tokens = _required_nonnegative_integer(typed_body, "tokens_evaluated")
     output_tokens = _required_nonnegative_integer(typed_body, "tokens_predicted")

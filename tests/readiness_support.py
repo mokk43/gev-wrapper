@@ -242,7 +242,10 @@ class ControlledBackend:
                     "probs": [
                         {
                             "top_logprobs": [
-                                {"id": token_id, "logprob": -float(token_id + 1)}
+                                {
+                                    "id": token_id,
+                                    "logprob": -math.log(coverage),
+                                }
                                 for token_id in range(coverage)
                             ]
                         }

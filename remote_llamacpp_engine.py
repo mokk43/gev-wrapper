@@ -148,6 +148,7 @@ class RemoteLlamaCppEngine:
             "temperature": -1.0,
 
             "n_probs": int(self.n_probs),
+            "min_keep": int(self.n_probs),
 
             # We don't want sampled/post-sampler probabilities.
             "post_sampling_probs": False,
@@ -183,7 +184,7 @@ class RemoteLlamaCppEngine:
         try:
             # Current llama.cpp response:
             #
-            # "probs": [{
+            # "completion_probabilities": [{
             #   "id": ...,
             #   "logprob": ...,
             #   "token": " A",
@@ -193,12 +194,13 @@ class RemoteLlamaCppEngine:
             #   ]
             # }]
             #
-            top = body["probs"][0]["top_logprobs"]
+            top = body["completion_probabilities"][0]["top_logprobs"]
 
         except (KeyError, IndexError, TypeError) as exc:
             raise RuntimeError(
                 "Unexpected llama.cpp /completion response; "
-                f"expected probs[0].top_logprobs. Response: {body!r}"
+                "expected completion_probabilities[0].top_logprobs. "
+                f"Response: {body!r}"
             ) from exc
 
         # Match by token ID rather than token string.

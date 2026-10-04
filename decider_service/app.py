@@ -198,7 +198,18 @@ class CallerAuthenticationMiddleware:
             )
             await response(scope, receive, send)
             return
-        _scope_state(scope)["bearer_token"] = match.group(1).decode("ascii")
+        try:
+            bearer_token = match.group(1).decode("ascii")
+        except UnicodeDecodeError:
+            _log_scope_failure(scope, 401, "caller_authentication")
+            response = JSONResponse(
+                status_code=401,
+                content={"detail": "Bearer credential required."},
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+            await response(scope, receive, send)
+            return
+        _scope_state(scope)["bearer_token"] = bearer_token
         await self._app(scope, receive, send)
 
 

@@ -12,7 +12,7 @@ class ChoiceQuestion(BaseModel):
 
     type: Literal["choice"]
     instructions: StructuredValue | None = None
-    criteria: dict[str, StructuredValue | None] = Field(min_length=2)
+    criteria: dict[str, StructuredValue | None] = Field(min_length=1)
 
 
 class NoulCriteria(BaseModel):

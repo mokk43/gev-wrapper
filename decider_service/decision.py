@@ -315,17 +315,24 @@ class DecisionRuntime:
             for name, question in request.questions.items()
             if question.type == "score"
         }
-        prepared_answers: dict[str, Answer] = {
-            name: ScoreAnswer(
-                type="score",
-                score=0.0,
-                confidence=1.0,
-                legend={"0": question.criteria[0]},
-                probabilities={"0": 1.0},
-            )
-            for name, question in request.questions.items()
-            if question.type == "score" and len(question.criteria) == 1
-        }
+        prepared_answers: dict[str, Answer] = {}
+        for name, question in request.questions.items():
+            if question.type == "choice" and len(question.criteria) == 1:
+                choice = next(iter(question.criteria))
+                prepared_answers[name] = ChoiceAnswer(
+                    type="choice",
+                    choice=choice,
+                    confidence=1.0,
+                    probabilities={choice: 1.0},
+                )
+            elif question.type == "score" and len(question.criteria) == 1:
+                prepared_answers[name] = ScoreAnswer(
+                    type="score",
+                    score=0.0,
+                    confidence=1.0,
+                    legend={"0": question.criteria[0]},
+                    probabilities={"0": 1.0},
+                )
         questions: dict[str, dict[str, Any]] = {
             name: question.model_dump(mode="python")
             for name, question in request.questions.items()

@@ -27,7 +27,7 @@ TypeSafe's HTTP contract, rechecked on 2026-10-03, supplies the API key through 
 - `state` is text, a JSON object, or an array. HTTP OpenAPI does not permit null state.
 - `questions` maps caller-chosen names to typed definitions. Support mixed Choice, Noul, and Score questions in the same request.
 - Instructions may be text, objects, arrays, null, or omitted, as permitted by each question schema.
-- Choice criteria are an object mapping labels to descriptions; descriptions may be text, objects, arrays, or null. An array of labels is an upstream Decider extension, not part of the accepted public contract.
+- Choice criteria are a nonempty object mapping labels to descriptions; descriptions may be text, objects, arrays, or null. A one-label Choice is deterministic and returns that label with confidence and probability `1.0` without inference. An array of labels is an upstream Decider extension, not part of the accepted public contract.
 - Noul criteria may be omitted, null, or an object with optional `true` and `false` descriptions.
 - Score criteria are an ordered, nonempty array of text, object, or array descriptions. The inspected HTTP schema permits one level, while some SDK validation requires two. Handle a valid one-level rubric explicitly rather than letting a backend two-option assertion define the public contract.
 

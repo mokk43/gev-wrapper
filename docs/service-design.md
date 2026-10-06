@@ -2,7 +2,8 @@
 
 Status: accepted on 2026-10-02; local development inputs and caller-key
 forwarding amended by the user on 2026-10-03; local backend port corrected by
-the user on 2026-10-04. Implementation began with the model-catalog slice on
+the user on 2026-10-04; exhausted probability-coverage behavior amended by the
+user on 2026-10-06. Implementation began with the model-catalog slice on
 2026-10-03.
 
 ## Purpose and boundary
@@ -78,9 +79,9 @@ probabilities. Ignore generated text as a source of decision answers. Relative
 log probabilities can stand in for logits because the shared full-vocabulary
 normalization term cancels when softmax is applied over the requested options.
 
-Start coverage at 256 tokens. If required option tokens are absent, double the requested coverage for each retry and clamp the final attempt to the readiness-verified maximum. Use full-vocabulary coverage only when that maximum equals the verified vocabulary size. Every response must contain exactly the requested number of unique, in-vocabulary token probabilities at the single final slot. Log probabilities must be finite and nonpositive; returned probability mass may not exceed one by more than `1e-6`, and full-vocabulary mass must sum to one within the same absolute tolerance. Retry under the same admission limits and whole-request deadline. Never assign fabricated probability mass to absent options or return a distribution normalized over only the options that happened to appear.
+Start coverage at 256 tokens. If required option tokens are absent, double the requested coverage for each retry and clamp the final attempt to the readiness-verified maximum. Use full-vocabulary coverage only when that maximum equals the verified vocabulary size. Every backend response must contain exactly the requested number of unique, in-vocabulary token probabilities at the single final slot. Backend log probabilities must be finite and nonpositive; returned probability mass may not exceed one by more than `1e-6`, and full-vocabulary mass must sum to one within the same absolute tolerance. Retry under the same admission limits and whole-request deadline. If the maximum coverage response still omits some required option tokens, assign those options an internal log probability of negative infinity so calibrated softmax returns probability zero. The remaining options are normalized over the returned options, so this fallback can overstate their probabilities. If every option token is missing, fail with a backend error rather than emit an invalid all-zero distribution.
 
-The maximum coverage and vocabulary discovery method must be verified against the chosen llama.cpp build. The supplied engine assumes vocabulary size is available at `/v1/models` as `data[0].meta.n_vocab`; treat that as an unverified deployment capability. If required coverage cannot be obtained, fail the request with a backend error. Full-vocabulary responses can be large and increase latency.
+The maximum coverage and vocabulary discovery method must be verified against the chosen llama.cpp build. The supplied engine assumes vocabulary size is available at `/v1/models` as `data[0].meta.n_vocab`; treat that as an unverified deployment capability. If the requested coverage itself cannot be obtained, fail the request with a backend error. Full-vocabulary responses can be large and increase latency.
 
 ## Token accounting
 
@@ -109,7 +110,7 @@ Use a 60-second whole-request deadline covering admission, preparation, inferenc
 Return all answers or an error; do not send partial successful answer maps. Error policy:
 
 - 422: invalid public input, unsupported configured model, model-capacity violation, or oversized prompt. Use TypeSafe's field-oriented `detail` validation shape.
-- 502: malformed backend response, unusable probability coverage, or invalid/missing required backend counters.
+- 502: malformed backend response, coverage the backend cannot provide as requested, all option tokens missing at maximum coverage, or invalid/missing required backend counters. Partial option-token omissions at maximum coverage are assigned zero probability.
 - 503: unavailable backend or exhausted admission capacity.
 - 504: whole-request deadline expired.
 
@@ -149,7 +150,7 @@ These are required checks, not tests already executed.
 
 - Contract: valid mixed requests and structured descriptions yield the required answer shapes; names, labels, rubric descriptions, and configured identity survive conversion. Exercise nullable/omitted fields according to HTTP OpenAPI, one-level Score, invalid discriminators, empty questions, unknown models, and backend option limits.
 - Semantics: controlled backend distributions produce the expected Choice, Noul, Score, and confidence values through the pinned assembler. Verify per-type calibration once, option-ID matching, isolated levels, rounding tolerance, and independence when questions are reordered or added.
-- Backend: missing labels trigger bounded coverage retries; exhausted coverage, malformed distributions, wrong token IDs, incompatible tokenizers, missing counters, and context overflow fail explicitly. Compare representative GGUF fixtures with a trusted Decider inference baseline using a documented numerical tolerance.
+- Backend: missing labels trigger bounded coverage retries; partially missing option tokens at maximum coverage receive zero probability, while total option-token absence, malformed distributions, wrong token IDs, incompatible tokenizers, missing counters, and context overflow fail explicitly. Compare representative GGUF fixtures with a trusted Decider inference baseline using a documented numerical tolerance.
 - Async behavior: a slow backend does not block unrelated requests; concurrent work respects the global limit and bounded admission. Exercise cancellation and a deadline that includes queueing and multiple coverage attempts.
 - Accounting: multiple rows, repeated state, retries, caching behavior, and concurrent callers produce attributable counters rather than shared totals.
 - Operations: TypeSafe bearer credentials are required for real-user requests and forwarded to the configured backend, including coverage retries. Different concurrent caller keys remain isolated; startup probe credentials cannot substitute for missing or rejected caller keys. Verify catalog and inference authentication, caller-key rejection, unavailable-backend and shutdown behavior, and that failures/logs never expose State, prompts, or secrets.

@@ -529,7 +529,7 @@ async def test_full_vocabulary_coverage_requires_complete_probability_mass(
 
 
 @pytest.mark.anyio
-async def test_exhausted_probability_coverage_returns_no_partial_answers(
+async def test_exhausted_probability_coverage_zeroes_missing_option(
     metadata_directory: Path,
 ) -> None:
     coverages: list[int] = []
@@ -561,11 +561,11 @@ async def test_exhausted_probability_coverage_returns_no_partial_answers(
             json=choice_request_payload(),
         )
 
-    assert response.status_code == 502
-    assert response.json() == {
-        "detail": "Backend response did not satisfy the inference contract."
-    }
-    assert "answers" not in response.json()
+    assert response.status_code == 200
+    answer = response.json()["answers"]["priority"]
+    assert answer["choice"] == "urgent"
+    assert answer["confidence"] == 1.0
+    assert answer["probabilities"] == {"urgent": 1.0, "routine": 0.0}
     assert coverages == [256, 512, 600]
 
 

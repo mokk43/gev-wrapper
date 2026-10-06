@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 import sys
 from collections.abc import AsyncIterator, Callable, Iterator
@@ -40,8 +41,10 @@ from decider_service.deployment import (
     load_local_runtime_config,
     validate_local_deployment,
 )
-from decider_service.timing import measure_stage
+from decider_service.timing import measure_stage, request_id_context
 from decider_service.tokenizer import load_backend_tokenizer
+
+_LOGGER = logging.getLogger("decider_service")
 
 
 class PublicInputError(Exception):
@@ -66,10 +69,16 @@ class BackendProbabilityCoverageError(BackendContractError):
 
 
 class BackendMissingOptionCoverageError(BackendContractError):
-    def __init__(self, input_tokens: int, output_tokens: int) -> None:
+    def __init__(
+        self,
+        input_tokens: int,
+        output_tokens: int,
+        missing_token_ids: tuple[int, ...],
+    ) -> None:
         super().__init__("backend probability coverage omitted a required option")
         self.input_tokens = input_tokens
         self.output_tokens = output_tokens
+        self.missing_token_ids = missing_token_ids
 
 
 class BackendProbabilityDataError(BackendContractError):
@@ -202,6 +211,35 @@ class ReadinessFixture:
     vocabulary_size: int
     label_token_ids: tuple[int, ...]
     row: PreparedRow
+
+
+def _log_backend_validation_failure(
+    *,
+    row_index: int,
+    attempt: int,
+    error: BackendContractError,
+    missing_option_positions: tuple[int, ...] | None = None,
+) -> None:
+    log_values = (
+        request_id_context.get() or "unavailable",
+        row_index,
+        attempt,
+        type(error).__name__,
+    )
+    if missing_option_positions is None:
+        _LOGGER.error(
+            "backend_response_validation_failed request_id=%s row_index=%d "
+            "attempt=%d error_type=%s",
+            *log_values,
+        )
+        return
+    positions = ",".join(str(position) for position in missing_option_positions)
+    _LOGGER.error(
+        "backend_response_validation_failed request_id=%s row_index=%d "
+        "attempt=%d error_type=%s missing_option_positions=%s",
+        *log_values,
+        positions,
+    )
 
 
 def _question_name_for_row(
@@ -437,6 +475,7 @@ def parse_backend_row(
     expected_input_tokens: int | None = None,
     expected_probability_coverage: int | None = None,
     vocabulary_size: int | None = None,
+    allow_missing_option_tokens: bool = False,
 ) -> BackendRow:
     if not isinstance(body, dict):
         raise BackendContractError("backend returned malformed completion data")
@@ -532,15 +571,21 @@ def parse_backend_row(
         )
     if typed_body.get("truncated") is True:
         raise BackendContractError("backend truncated a rendered prompt")
-    try:
-        required_probabilities = tuple(
-            by_token_id[token_id] for token_id in required_token_ids
-        )
-    except KeyError as exc:
+    missing_token_ids = tuple(
+        token_id for token_id in required_token_ids if token_id not in by_token_id
+    )
+    if missing_token_ids and (
+        not allow_missing_option_tokens
+        or all(token_id not in by_token_id for token_id in required_token_ids)
+    ):
         raise BackendMissingOptionCoverageError(
             input_tokens,
             output_tokens,
-        ) from exc
+            missing_token_ids,
+        )
+    required_probabilities = tuple(
+        by_token_id.get(token_id, -math.inf) for token_id in required_token_ids
+    )
     return BackendRow(required_probabilities, input_tokens, output_tokens)
 
 
@@ -596,7 +641,13 @@ async def _evaluate_row(
             try:
                 body = response.json()
             except ValueError as exc:
-                raise BackendContractError("backend returned malformed JSON") from exc
+                error = BackendContractError("backend returned malformed JSON")
+                _log_backend_validation_failure(
+                    row_index=row_index,
+                    attempt=attempt,
+                    error=error,
+                )
+                raise error from exc
             if isinstance(body, dict) and isinstance(body.get("timings"), dict):
                 for name in ("prompt_ms", "predicted_ms"):
                     value = body["timings"].get(name)
@@ -613,14 +664,60 @@ async def _evaluate_row(
                     expected_input_tokens=len(row.token_ids),
                     expected_probability_coverage=probability_coverage,
                     vocabulary_size=coverage_policy.vocabulary_size,
+                    allow_missing_option_tokens=(
+                        probability_coverage == coverage_policy.maximum
+                    ),
                 )
             except BackendMissingOptionCoverageError as exc:
                 input_tokens += exc.input_tokens
                 output_tokens += exc.output_tokens
                 if probability_coverage == coverage_policy.maximum:
+                    missing_option_positions = tuple(
+                        position
+                        for position, token_id in enumerate(
+                            label_token_ids[: row.option_count],
+                            start=1,
+                        )
+                        if token_id in exc.missing_token_ids
+                    )
+                    _log_backend_validation_failure(
+                        row_index=row_index,
+                        attempt=attempt,
+                        error=exc,
+                        missing_option_positions=missing_option_positions,
+                    )
                     raise
                 timing.outcome = "retry"
                 continue
+            except BackendContractError as exc:
+                _log_backend_validation_failure(
+                    row_index=row_index,
+                    attempt=attempt,
+                    error=exc,
+                )
+                raise
+            missing_option_positions = tuple(
+                position
+                for position, log_probability in enumerate(
+                    result.log_probabilities,
+                    start=1,
+                )
+                if log_probability == -math.inf
+            )
+            if missing_option_positions:
+                positions = ",".join(
+                    str(position) for position in missing_option_positions
+                )
+                _LOGGER.warning(
+                    "backend_missing_option_probability_zeroed request_id=%s "
+                    "row_index=%d attempt=%d n_probs=%d "
+                    "missing_option_positions=%s",
+                    request_id_context.get() or "unavailable",
+                    row_index,
+                    attempt,
+                    probability_coverage,
+                    positions,
+                )
         return BackendRow(
             result.log_probabilities,
             input_tokens + result.input_tokens,
